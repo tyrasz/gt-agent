@@ -6,14 +6,16 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GalacticTycoonsClient, GtApiError, RateLimitError } from "./gtClient.js";
 import { RestLlmPlanner } from "./llm/providers.js";
+import { ModelCatalogService } from "./modelCatalog.js";
 import { redactError, redactSecrets } from "./redact.js";
-import { SessionStore } from "./sessionStore.js";
+import { MissingProviderKeyError, SessionStore } from "./sessionStore.js";
 import { SitrepService } from "./sitrepService.js";
-import { sessionKeysRequestSchema, sitrepRequestSchema } from "../shared/schemas.js";
+import { modelCatalogQuerySchema, sessionKeysRequestSchema, sitrepRequestSchema } from "../shared/schemas.js";
 
 export type CreateAppOptions = {
   gtClient?: GalacticTycoonsClient;
   llmPlanner?: RestLlmPlanner;
+  modelCatalog?: ModelCatalogService;
   sessionStore?: SessionStore;
 };
 
@@ -21,6 +23,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   const sessions = options.sessionStore ?? new SessionStore();
   const gtClient = options.gtClient ?? new GalacticTycoonsClient();
   const llmPlanner = options.llmPlanner ?? new RestLlmPlanner();
+  const modelCatalog = options.modelCatalog ?? new ModelCatalogService();
   const sitrepService = new SitrepService(gtClient, llmPlanner, sessions);
 
   const app = fastify({
@@ -60,6 +63,28 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   app.delete("/api/session", async (request, reply) => {
     sessions.destroy(request, reply);
     return { ok: true };
+  });
+
+  app.get("/api/session/models", async (request, reply) => {
+    const session = sessions.get(request);
+    if (!session) return reply.code(401).send({ error: "No active GT Agent session." });
+
+    const parsed = modelCatalogQuerySchema.safeParse(request.query);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid model catalog request.", details: parsed.error.format() });
+    }
+
+    try {
+      return await modelCatalog.listModels(session, parsed.data.provider, Boolean(parsed.data.refresh));
+    } catch (error) {
+      if (error instanceof MissingProviderKeyError) {
+        return reply.code(400).send({
+          error: `No ${parsed.data.provider} API key is stored in this session.`
+        });
+      }
+      request.log.error({ error: redactError(error) }, "model catalog failed");
+      return reply.code(500).send({ error: "Could not load provider models." });
+    }
   });
 
   app.post("/api/agent/sitrep", async (request, reply) => {

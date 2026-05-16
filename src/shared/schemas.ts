@@ -10,6 +10,12 @@ export const providerKeysSchema = z.object({
 });
 export type ProviderKeys = z.infer<typeof providerKeysSchema>;
 
+const booleanQuerySchema = z.preprocess((value) => {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return value;
+}, z.boolean());
+
 export const sessionKeysRequestSchema = z.object({
   gtApiKey: z.string().trim().min(8, "Enter a Galactic Tycoons API key."),
   providerKeys: providerKeysSchema.refine((keys) => Object.keys(keys).length > 0, {
@@ -18,6 +24,27 @@ export const sessionKeysRequestSchema = z.object({
 });
 export type SessionKeysRequest = z.infer<typeof sessionKeysRequestSchema>;
 
+export const modelCatalogQuerySchema = z.object({
+  provider: providerSchema,
+  refresh: booleanQuerySchema.optional()
+});
+export type ModelCatalogQuery = z.infer<typeof modelCatalogQuerySchema>;
+
+export const modelOptionSchema = z.object({
+  id: z.string(),
+  label: z.string().optional(),
+  source: z.enum(["provider", "fallback"]).optional()
+});
+export type ModelOption = z.infer<typeof modelOptionSchema>;
+
+export const modelCatalogResponseSchema = z.object({
+  provider: providerSchema,
+  defaultModel: z.string(),
+  models: z.array(modelOptionSchema),
+  warnings: z.array(z.string()).default([])
+});
+export type ModelCatalogResponse = z.infer<typeof modelCatalogResponseSchema>;
+
 export const cashRiskLevelSchema = z.enum(["conservative", "balanced", "aggressive"]);
 
 export const playerPlanningContextSchema = z.object({
@@ -25,6 +52,7 @@ export const playerPlanningContextSchema = z.object({
   autonomyHours: z.number().min(1).max(168),
   cashRiskLevel: cashRiskLevelSchema,
   shortTermGoal: z.string().trim().min(2).max(240),
+  userPrompt: z.string().trim().max(2000).optional(),
   notes: z.string().trim().max(1000).optional()
 });
 export type PlayerPlanningContext = z.infer<typeof playerPlanningContextSchema>;

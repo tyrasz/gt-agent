@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   BarChart3,
@@ -11,13 +11,15 @@ import {
   Loader2,
   LogOut,
   Map,
+  RefreshCw,
   Rocket,
   Send,
+  Settings2,
   ShieldCheck,
   Ship,
   TrendingUp
 } from "lucide-react";
-import type { Provider, SitrepResponse } from "../shared/schemas.js";
+import type { ModelCatalogResponse, ModelOption, Provider, SitrepResponse } from "../shared/schemas.js";
 
 type Tab = "sitrep" | "market" | "operations" | "logistics" | "expansion" | "raw";
 
@@ -28,9 +30,15 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const defaultModels: Record<Provider, string> = {
-  openai: "gpt-4o-mini",
-  anthropic: "claude-3-5-haiku-latest",
-  gemini: "gemini-1.5-flash"
+  openai: "gpt-5.5",
+  anthropic: "claude-sonnet-4-6",
+  gemini: "gemini-3.1-pro-preview"
+};
+
+const fallbackModelOptions: Record<Provider, ModelOption[]> = {
+  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4.1"].map((id) => ({ id, label: id, source: "fallback" })),
+  anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"].map((id) => ({ id, label: id, source: "fallback" })),
+  gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"].map((id) => ({ id, label: id, source: "fallback" }))
 };
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
@@ -45,6 +53,11 @@ const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
 export default function App() {
   const [provider, setProvider] = useState<Provider>("openai");
   const [model, setModel] = useState(defaultModels.openai);
+  const [modelMode, setModelMode] = useState<"catalog" | "custom">("catalog");
+  const [customModel, setCustomModel] = useState("");
+  const [modelCatalog, setModelCatalog] = useState<ModelCatalogResponse | null>(null);
+  const [modelLoading, setModelLoading] = useState(false);
+  const [modelError, setModelError] = useState("");
   const [gtKey, setGtKey] = useState("");
   const [providerKey, setProviderKey] = useState("");
   const [hasSession, setHasSession] = useState(false);
@@ -55,6 +68,7 @@ export default function App() {
   const [runError, setRunError] = useState("");
   const [runLoading, setRunLoading] = useState(false);
   const [planning, setPlanning] = useState({
+    userPrompt: "Give me a SITREP and the highest-impact actions before my next login.",
     nextLoginAt: "",
     autonomyHours: 12,
     cashRiskLevel: "balanced",
@@ -68,10 +82,48 @@ export default function App() {
     return counts;
   }, [sitrep]);
 
+  const visibleModelOptions = modelCatalog?.models.length ? modelCatalog.models : fallbackModelOptions[provider];
+  const selectedModel = modelMode === "custom" ? customModel.trim() : model;
+
+  useEffect(() => {
+    if (hasSession) {
+      void loadModels(provider);
+    }
+  }, [hasSession, provider]);
+
   function updateProvider(nextProvider: Provider) {
     setProvider(nextProvider);
     setModel(defaultModels[nextProvider]);
+    setModelMode("catalog");
+    setCustomModel("");
+    setModelCatalog(null);
+    setModelError("");
     setProviderKey("");
+  }
+
+  async function loadModels(targetProvider = provider, refresh = false) {
+    setModelLoading(true);
+    setModelError("");
+    try {
+      const response = await fetch(`/api/session/models?provider=${targetProvider}&refresh=${refresh ? "true" : "false"}`, {
+        credentials: "include"
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(body.error ?? "Could not load provider models.");
+      }
+      const catalog = body as ModelCatalogResponse;
+      setModelCatalog(catalog);
+      setModel(catalog.defaultModel);
+      setModelMode("catalog");
+      setCustomModel("");
+    } catch (error) {
+      setModelCatalog(null);
+      setModel(defaultModels[targetProvider]);
+      setModelError(error instanceof Error ? error.message : "Could not load provider models.");
+    } finally {
+      setModelLoading(false);
+    }
   }
 
   async function saveKeys(event: React.FormEvent<HTMLFormElement>) {
@@ -95,6 +147,7 @@ export default function App() {
       setGtKey("");
       setProviderKey("");
       setHasSession(true);
+      setModelCatalog(null);
     } catch (error) {
       setSetupError(error instanceof Error ? error.message : "Could not save session keys.");
     } finally {
@@ -106,6 +159,8 @@ export default function App() {
     await fetch("/api/session", { method: "DELETE", credentials: "include" });
     setHasSession(false);
     setSitrep(null);
+    setModelCatalog(null);
+    setModelError("");
   }
 
   async function generateSitrep(event: React.FormEvent<HTMLFormElement>) {
@@ -119,12 +174,18 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           provider,
-          model,
+          model: selectedModel,
           planningContext: {
             ...planning,
             autonomyHours: Number(planning.autonomyHours),
             nextLoginAt: planning.nextLoginAt || undefined,
+            userPrompt: planning.userPrompt.trim() || undefined,
             notes: planning.notes || undefined
+          },
+          refresh: {
+            forceCompany: true,
+            forceMarket: true,
+            forceGameData: false
           }
         })
       });
@@ -242,57 +303,25 @@ export default function App() {
           </aside>
         </section>
       ) : (
-        <section className="workspace-grid">
-          <form className="planner-panel" onSubmit={generateSitrep}>
-            <div className="section-heading">
-              <ClipboardList size={19} />
-              <h2>Planning Context</h2>
+        <section className="console-layout">
+          <form className="console-panel" onSubmit={generateSitrep}>
+            <div className="console-header">
+              <div className="section-heading">
+                <ClipboardList size={19} />
+                <h2>Command Console</h2>
+              </div>
+              <span className="status-pill ready">Fresh GT snapshot on submit</span>
             </div>
             <label>
-              Short-term goal
-              <input
-                value={planning.shortTermGoal}
-                onChange={(event) => setPlanning({ ...planning, shortTermGoal: event.target.value })}
+              Command prompt
+              <textarea
+                className="prompt-box"
+                value={planning.userPrompt}
+                onChange={(event) => setPlanning({ ...planning, userPrompt: event.target.value })}
                 required
               />
             </label>
-            <div className="field-row">
-              <label>
-                Autonomy hours
-                <input
-                  type="number"
-                  min="1"
-                  max="168"
-                  value={planning.autonomyHours}
-                  onChange={(event) => setPlanning({ ...planning, autonomyHours: Number(event.target.value) })}
-                  required
-                />
-              </label>
-              <label>
-                Cash risk
-                <select
-                  value={planning.cashRiskLevel}
-                  onChange={(event) => setPlanning({ ...planning, cashRiskLevel: event.target.value })}
-                >
-                  <option value="conservative">Conservative</option>
-                  <option value="balanced">Balanced</option>
-                  <option value="aggressive">Aggressive</option>
-                </select>
-              </label>
-            </div>
-            <label>
-              Next login
-              <input
-                type="datetime-local"
-                value={planning.nextLoginAt}
-                onChange={(event) => setPlanning({ ...planning, nextLoginAt: event.target.value })}
-              />
-            </label>
-            <label>
-              Notes
-              <textarea value={planning.notes} onChange={(event) => setPlanning({ ...planning, notes: event.target.value })} />
-            </label>
-            <div className="field-row">
+            <div className="control-grid">
               <label>
                 Provider
                 <select value={provider} onChange={(event) => updateProvider(event.target.value as Provider)}>
@@ -303,21 +332,100 @@ export default function App() {
               </label>
               <label>
                 Model
-                <input value={model} onChange={(event) => setModel(event.target.value)} required />
+                <select
+                  value={modelMode === "custom" ? "__custom" : model}
+                  onChange={(event) => {
+                    if (event.target.value === "__custom") {
+                      setModelMode("custom");
+                      setCustomModel(model);
+                    } else {
+                      setModelMode("catalog");
+                      setModel(event.target.value);
+                    }
+                  }}
+                >
+                  {visibleModelOptions.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label ?? option.id}</option>
+                  ))}
+                  <option value="__custom">Custom model ID</option>
+                </select>
               </label>
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => loadModels(provider, true)}
+                disabled={modelLoading}
+              >
+                {modelLoading ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+                Refresh Models
+              </button>
             </div>
+            {modelMode === "custom" ? (
+              <label>
+                Custom model ID
+                <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} required />
+              </label>
+            ) : null}
+            <details className="advanced-context">
+              <summary><Settings2 size={16} /> Planning controls</summary>
+              <div className="context-grid">
+                <label>
+                  Short-term goal
+                  <input
+                    value={planning.shortTermGoal}
+                    onChange={(event) => setPlanning({ ...planning, shortTermGoal: event.target.value })}
+                    required
+                  />
+                </label>
+                <label>
+                  Autonomy hours
+                  <input
+                    type="number"
+                    min="1"
+                    max="168"
+                    value={planning.autonomyHours}
+                    onChange={(event) => setPlanning({ ...planning, autonomyHours: Number(event.target.value) })}
+                    required
+                  />
+                </label>
+                <label>
+                  Cash risk
+                  <select
+                    value={planning.cashRiskLevel}
+                    onChange={(event) => setPlanning({ ...planning, cashRiskLevel: event.target.value })}
+                  >
+                    <option value="conservative">Conservative</option>
+                    <option value="balanced">Balanced</option>
+                    <option value="aggressive">Aggressive</option>
+                  </select>
+                </label>
+                <label>
+                  Next login
+                  <input
+                    type="datetime-local"
+                    value={planning.nextLoginAt}
+                    onChange={(event) => setPlanning({ ...planning, nextLoginAt: event.target.value })}
+                  />
+                </label>
+              </div>
+              <label>
+                Notes
+                <textarea value={planning.notes} onChange={(event) => setPlanning({ ...planning, notes: event.target.value })} />
+              </label>
+            </details>
+            {modelCatalog?.warnings.length ? <p className="warning-text">{modelCatalog.warnings.join(" ")}</p> : null}
+            {modelError ? <p className="error-line">{modelError}</p> : null}
             {runError ? <p className="error-line">{runError}</p> : null}
-            <button className="primary-button" type="submit" disabled={runLoading}>
+            <button className="primary-button run-button" type="submit" disabled={runLoading || !selectedModel}>
               {runLoading ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
               Generate Sitrep
             </button>
           </form>
-
           <div className="dashboard">
             <div className="summary-band">
               <div>
-                <span>Generated</span>
-                <strong>{sitrep ? new Date(sitrep.generatedAt).toLocaleString() : "Waiting"}</strong>
+                <span>Snapshot</span>
+                <strong>{sitrep?.rawSnapshot?.fetchedAt ? new Date(sitrep.rawSnapshot.fetchedAt).toLocaleString() : "Waiting"}</strong>
               </div>
               <div>
                 <span>Critical</span>
@@ -328,8 +436,12 @@ export default function App() {
                 <strong>{priorityCounts.high}</strong>
               </div>
               <div>
-                <span>Provider</span>
-                <strong>{providerLabels[provider]}</strong>
+                <span>Model</span>
+                <strong>{providerLabels[provider]} / {selectedModel || "None"}</strong>
+              </div>
+              <div>
+                <span>Pipeline</span>
+                <strong>{sitrep?.diagnostics?.source ?? "Waiting"}</strong>
               </div>
             </div>
 

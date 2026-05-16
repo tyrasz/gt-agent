@@ -61,4 +61,34 @@ describe("RestLlmPlanner", () => {
       deterministicSitrep
     })).rejects.toThrow("timed out");
   });
+
+  it("sends the player prompt inside the OpenAI planning request", async () => {
+    let promptBody = "";
+    const planner = new RestLlmPlanner({
+      fetchImpl: async (_input, init) => {
+        const body = JSON.parse(String(init?.body ?? "{}")) as { messages?: Array<{ content?: string }> };
+        promptBody = body.messages?.map((message) => message.content ?? "").join("\n") ?? "";
+        return Response.json({ choices: [{ message: { content: JSON.stringify(makeProviderJson()) } }] });
+      }
+    });
+
+    const snapshot = makeSnapshot();
+    const planningContext = {
+      ...context,
+      userPrompt: "Focus on cargo bottlenecks before my next login."
+    };
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, planningContext, "openai", "test-model");
+
+    await planner.generateStructuredPlan({
+      provider: "openai",
+      model: "test-model",
+      providerApiKey: "sk-test",
+      planningContext,
+      snapshot,
+      deterministicSitrep
+    });
+
+    expect(promptBody).toContain("The player request to answer first");
+    expect(promptBody).toContain("Focus on cargo bottlenecks before my next login.");
+  });
 });

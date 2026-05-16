@@ -3,7 +3,13 @@ import type { GalacticTycoonsClient } from "./gtClient.js";
 import type { LlmPlanner } from "./llm/providers.js";
 import { LlmProviderError } from "./llm/providers.js";
 import { MissingProviderKeyError, type AgentSession, type SessionStore } from "./sessionStore.js";
-import type { SitrepRequest, SitrepResponse } from "../shared/schemas.js";
+import type { RefreshOptions, SitrepRequest, SitrepResponse } from "../shared/schemas.js";
+
+const DEFAULT_SITREP_REFRESH: RefreshOptions = {
+  forceCompany: true,
+  forceMarket: true,
+  forceGameData: false
+};
 
 export class SitrepService {
   constructor(
@@ -14,7 +20,10 @@ export class SitrepService {
 
   async generate(session: AgentSession, request: SitrepRequest): Promise<SitrepResponse> {
     const totalStartedAt = Date.now();
-    const snapshot = await this.gtClient.getSnapshot(session, request.refresh);
+    const snapshot = await this.gtClient.getSnapshot(session, {
+      ...DEFAULT_SITREP_REFRESH,
+      ...request.refresh
+    });
     const snapshotMs = Date.now() - totalStartedAt;
     const deterministic = buildDeterministicSitrep(snapshot, request.planningContext, request.provider, request.model);
     const deterministicMs = Date.now() - totalStartedAt - snapshotMs;

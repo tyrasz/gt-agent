@@ -186,6 +186,7 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
 
   return [
     validationHint,
+    input.planningContext.userPrompt ? `The player request to answer first: ${input.planningContext.userPrompt}` : "",
     "Create the final SitrepResponse JSON with these top-level keys:",
     "generatedAt, provider, model, summary, actionPlans, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, warnings.",
     "preparedCommands must always include executable:false.",

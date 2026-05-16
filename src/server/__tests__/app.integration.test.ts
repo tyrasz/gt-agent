@@ -20,13 +20,21 @@ describe("API integration", () => {
 
   it("stores keys only behind an HTTP-only session cookie and returns a sitrep", async () => {
     const snapshot = makeSnapshot();
+    let observedRefresh: unknown;
+    let observedPlanningContext: unknown;
     app = await createApp({
       sessionStore: new SessionStore(),
       gtClient: {
-        getSnapshot: async () => snapshot
+        getSnapshot: async (_session: unknown, refresh: unknown) => {
+          observedRefresh = refresh;
+          return snapshot;
+        }
       } as any,
       llmPlanner: {
-        generateStructuredPlan: async (input: any) => buildDeterministicSitrep(snapshot, input.planningContext, input.provider, input.model)
+        generateStructuredPlan: async (input: any) => {
+          observedPlanningContext = input.planningContext;
+          return buildDeterministicSitrep(snapshot, input.planningContext, input.provider, input.model);
+        }
       } as any
     });
 
@@ -50,11 +58,78 @@ describe("API integration", () => {
       payload: {
         provider: "openai",
         model: "test-model",
-        planningContext: context
+        planningContext: {
+          ...context,
+          userPrompt: "Find the best restock move."
+        }
       }
     });
 
     expect(sitrep.statusCode).toBe(200);
     expect(sitrep.json().rawSnapshot.company.name).toBe("Stellar Foundry");
+    expect(observedRefresh).toEqual({ forceCompany: true, forceMarket: true, forceGameData: false });
+    expect(observedPlanningContext).toMatchObject({ userPrompt: "Find the best restock move." });
+  });
+
+  it("returns session provider models without exposing keys", async () => {
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      modelCatalog: {
+        listModels: async () => ({
+          provider: "openai",
+          defaultModel: "gpt-5.5",
+          models: [{ id: "gpt-5.5", label: "gpt-5.5", source: "provider" }],
+          warnings: []
+        })
+      } as any
+    });
+
+    const missingSession = await app.inject({
+      method: "GET",
+      url: "/api/session/models?provider=openai"
+    });
+    expect(missingSession.statusCode).toBe(401);
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const models = await app.inject({
+      method: "GET",
+      url: "/api/session/models?provider=openai&refresh=true",
+      headers: { cookie: String(keys.headers["set-cookie"]) }
+    });
+
+    expect(models.statusCode).toBe(200);
+    expect(models.body).toContain("gpt-5.5");
+    expect(models.body).not.toContain("sk-secret-key");
+  });
+
+  it("rejects model listing for providers without a stored key", async () => {
+    app = await createApp({ sessionStore: new SessionStore() });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const models = await app.inject({
+      method: "GET",
+      url: "/api/session/models?provider=anthropic",
+      headers: { cookie: String(keys.headers["set-cookie"]) }
+    });
+
+    expect(models.statusCode).toBe(400);
+    expect(models.body).toContain("No anthropic API key");
+    expect(models.body).not.toContain("sk-secret-key");
   });
 });
