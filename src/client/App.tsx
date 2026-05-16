@@ -30,13 +30,13 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const defaultModels: Record<Provider, string> = {
-  openai: "gpt-5.5",
+  openai: "gpt-5.5-mini",
   anthropic: "claude-sonnet-4-6",
   gemini: "gemini-3.1-pro-preview"
 };
 
 const fallbackModelOptions: Record<Provider, ModelOption[]> = {
-  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4.1"].map((id) => ({ id, label: id, source: "fallback" })),
+  openai: ["gpt-5.5-mini", "gpt-5.4-mini", "gpt-5.2-mini", "gpt-4.1-mini", "gpt-5.5", "gpt-5.4", "gpt-4.1"].map((id) => ({ id, label: id, source: "fallback" })),
   anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"].map((id) => ({ id, label: id, source: "fallback" })),
   gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"].map((id) => ({ id, label: id, source: "fallback" }))
 };
@@ -366,6 +366,7 @@ export default function App() {
                 <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} required />
               </label>
             ) : null}
+            {provider === "openai" ? <p className="helper-line">Fast OpenAI models are selected by default. Full models like gpt-5.5 may take longer.</p> : null}
             <details className="advanced-context">
               <summary><Settings2 size={16} /> Planning controls</summary>
               <div className="context-grid">

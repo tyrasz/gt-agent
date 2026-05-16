@@ -1,7 +1,7 @@
 import { buildDeterministicSitrep } from "./analysis.js";
 import type { GalacticTycoonsClient } from "./gtClient.js";
 import type { LlmPlanner } from "./llm/providers.js";
-import { LlmProviderError } from "./llm/providers.js";
+import { LlmProviderError, LlmProviderTimeoutError } from "./llm/providers.js";
 import { MissingProviderKeyError, type AgentSession, type SessionStore } from "./sessionStore.js";
 import type { RefreshOptions, SitrepRequest, SitrepResponse } from "../shared/schemas.js";
 
@@ -57,6 +57,9 @@ export class SitrepService {
         const llmMessage = error instanceof MissingProviderKeyError
           ? `No ${request.provider} API key is stored in this session. Start a new session with that provider key to use the model.`
           : error.message;
+        const warning = error instanceof LlmProviderTimeoutError
+          ? llmMessage
+          : `LLM provider unavailable or invalid; showing deterministic sitrep. ${llmMessage}`;
         return {
           ...deterministic,
           diagnostics: {
@@ -69,7 +72,7 @@ export class SitrepService {
             },
             llmMessage
           },
-          warnings: [...deterministic.warnings, `LLM provider unavailable or invalid; showing deterministic sitrep. ${llmMessage}`]
+          warnings: [...deterministic.warnings, warning]
         };
       }
       throw error;

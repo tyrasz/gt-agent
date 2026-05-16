@@ -211,13 +211,13 @@ function isAbortError(error: unknown): boolean {
 }
 
 const preferredIds: Record<Provider, string[]> = {
-  openai: ["gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.2", "gpt-5.2-mini", "gpt-4.1", "gpt-4.1-mini"],
+  openai: ["gpt-5.5-mini", "gpt-5.4-mini", "gpt-5.2-mini", "gpt-4.1-mini", "gpt-5.5", "gpt-5.5-pro", "gpt-5.4", "gpt-5.4-nano", "gpt-5.2", "gpt-4.1"],
   anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5", "claude-opus-4-1", "claude-sonnet-4"],
   gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash", "gemini-2.5-flash-lite"]
 };
 
 const fallbackIds: Record<Provider, string[]> = {
-  openai: ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.4-nano", "gpt-4.1"],
+  openai: ["gpt-5.5-mini", "gpt-5.4-mini", "gpt-5.2-mini", "gpt-4.1-mini", "gpt-5.5", "gpt-5.4", "gpt-4.1"],
   anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"],
   gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"]
 };

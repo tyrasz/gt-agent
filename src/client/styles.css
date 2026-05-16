@@ -294,6 +294,13 @@ textarea {
   color: #b02a37;
 }
 
+.helper-line {
+  color: #607069;
+  font-size: 0.82rem;
+  line-height: 1.35;
+  margin-top: -6px;
+}
+
 .brief-panel {
   align-content: start;
   display: grid;

@@ -1,4 +1,5 @@
-import { sitrepResponseSchema, type Provider, type SitrepResponse } from "../../shared/schemas.js";
+import { z } from "zod";
+import { actionPlanSchema, type Provider, type SitrepResponse } from "../../shared/schemas.js";
 import type { GameSnapshot, PlayerPlanningContext } from "../../shared/schemas.js";
 
 export type StructuredPlanInput = {
@@ -17,9 +18,76 @@ export type LlmPlanner = {
 export type LlmPlannerOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
+  timeoutMsByProvider?: Partial<Record<Provider, number>>;
 };
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
+const DEFAULT_OPENAI_TIMEOUT_MS = 60_000;
+const DEFAULT_PROVIDER_TIMEOUT_MS: Record<Provider, number> = {
+  openai: DEFAULT_OPENAI_TIMEOUT_MS,
+  anthropic: DEFAULT_LLM_TIMEOUT_MS,
+  gemini: DEFAULT_LLM_TIMEOUT_MS
+};
+
+const llmPlanDraftSchema = z.object({
+  summary: z.string().trim().min(1),
+  actionPlans: z.array(actionPlanSchema).default([]),
+  warnings: z.array(z.string()).default([])
+});
+
+const llmPlanDraftJsonSchema = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    summary: {
+      type: "string",
+      description: "A concise player-facing SITREP summary answering the current request first."
+    },
+    actionPlans: {
+      type: "array",
+      description: "Ranked manual action plans. Return an empty array if the deterministic action plans should be preserved.",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          priority: { type: "string", enum: ["low", "medium", "high", "critical"] },
+          category: { type: "string", enum: ["market", "operations", "logistics", "expansion", "risk"] },
+          expectedBenefit: { type: "string" },
+          costSummary: { type: "string" },
+          risk: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } },
+          preparedCommands: {
+            type: "array",
+            items: {
+              type: "object",
+              additionalProperties: false,
+              properties: {
+                type: {
+                  type: "string",
+                  enum: ["buy_material", "move_cargo", "start_production", "adjust_sell_offer", "save_base_plan", "review"]
+                },
+                title: { type: "string" },
+                executable: { type: "boolean", enum: [false] },
+                payload: { type: "object", additionalProperties: true },
+                steps: { type: "array", items: { type: "string" } }
+              },
+              required: ["type", "title", "executable", "payload", "steps"]
+            }
+          }
+        },
+        required: ["id", "title", "priority", "category", "expectedBenefit", "costSummary", "risk", "evidence", "preparedCommands"]
+      }
+    },
+    warnings: {
+      type: "array",
+      description: "Provider-side caveats that should be shown to the player.",
+      items: { type: "string" }
+    }
+  },
+  required: ["summary", "actionPlans", "warnings"]
+} as const;
 
 export class LlmProviderError extends Error {
   constructor(message: string, readonly provider: Provider, readonly status?: number) {
@@ -28,13 +96,25 @@ export class LlmProviderError extends Error {
   }
 }
 
+export class LlmProviderTimeoutError extends LlmProviderError {
+  constructor(provider: Provider, readonly timeoutMs: number) {
+    super(`${providerLabel(provider)} did not respond within ${formatTimeout(timeoutMs)}; showing deterministic sitrep. Try a faster model or increase timeout.`, provider);
+    this.name = "LlmProviderTimeoutError";
+  }
+}
+
 export class RestLlmPlanner implements LlmPlanner {
   private readonly fetchImpl: typeof fetch;
-  private readonly timeoutMs: number;
+  private readonly timeoutMsByProvider: Record<Provider, number>;
 
   constructor(options: LlmPlannerOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
-    this.timeoutMs = options.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS);
+    const fallbackTimeoutMs = options.timeoutMs ?? numberEnv("LLM_TIMEOUT_MS");
+    this.timeoutMsByProvider = {
+      openai: options.timeoutMsByProvider?.openai ?? numberEnv("OPENAI_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.openai,
+      anthropic: options.timeoutMsByProvider?.anthropic ?? numberEnv("ANTHROPIC_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.anthropic,
+      gemini: options.timeoutMsByProvider?.gemini ?? numberEnv("GEMINI_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.gemini
+    };
   }
 
   async generateStructuredPlan(input: StructuredPlanInput): Promise<SitrepResponse> {
@@ -56,21 +136,24 @@ export class RestLlmPlanner implements LlmPlanner {
         continue;
       }
 
-      const parsed = sitrepResponseSchema.safeParse(parsedJson);
+      const parsed = llmPlanDraftSchema.safeParse(parsedJson);
       if (parsed.success) {
+        const draft = parsed.data;
         return {
-          ...parsed.data,
+          ...input.deterministicSitrep,
+          summary: draft.summary,
+          actionPlans: draft.actionPlans.length > 0 ? draft.actionPlans : input.deterministicSitrep.actionPlans,
           provider: input.provider,
           model: input.model,
           rawSnapshot: input.snapshot,
-          warnings: [...input.deterministicSitrep.warnings, ...parsed.data.warnings]
+          warnings: mergeWarnings(input.deterministicSitrep.warnings, draft.warnings)
         };
       }
       lastValidationError = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
       validationHint = `The previous JSON failed validation: ${lastValidationError}`;
     }
 
-    throw new LlmProviderError(`Provider returned JSON that did not match the sitrep schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider);
+    throw new LlmProviderError(`Provider returned JSON that did not match the LLM draft schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider);
   }
 
   private async callProvider(input: StructuredPlanInput, prompt: string): Promise<string> {
@@ -80,7 +163,7 @@ export class RestLlmPlanner implements LlmPlanner {
   }
 
   private async callOpenAi(input: StructuredPlanInput, prompt: string): Promise<string> {
-    const response = await this.fetchProvider(input.provider, "https://api.openai.com/v1/chat/completions", {
+    const response = await this.fetchProvider(input.provider, "https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${input.providerApiKey}`,
@@ -88,16 +171,23 @@ export class RestLlmPlanner implements LlmPlanner {
       },
       body: JSON.stringify({
         model: input.model,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: systemPrompt() },
-          { role: "user", content: prompt }
-        ]
+        instructions: systemPrompt(),
+        input: prompt,
+        max_output_tokens: 6000,
+        store: false,
+        text: {
+          format: {
+            type: "json_schema",
+            name: "gt_agent_plan_draft",
+            schema: llmPlanDraftJsonSchema,
+            strict: false
+          }
+        }
       })
     });
 
     const body = await parseProviderResponse(response, input.provider);
-    const content = body.choices?.[0]?.message?.content;
+    const content = extractOpenAiResponseText(body);
     if (typeof content !== "string") throw new LlmProviderError("OpenAI response did not include message content.", input.provider, response.status);
     return content;
   }
@@ -132,7 +222,8 @@ export class RestLlmPlanner implements LlmPlanner {
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: `${systemPrompt()}\n\n${prompt}` }] }],
         generationConfig: {
-          responseMimeType: "application/json"
+          responseMimeType: "application/json",
+          responseJsonSchema: llmPlanDraftJsonSchema
         }
       })
     });
@@ -145,13 +236,14 @@ export class RestLlmPlanner implements LlmPlanner {
 
   private async fetchProvider(provider: Provider, url: string, init: RequestInit): Promise<Response> {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    const timeoutMs = this.timeoutMsByProvider[provider];
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       return await this.fetchImpl(url, { ...init, signal: controller.signal });
     } catch (error) {
       if (isAbortError(error)) {
-        throw new LlmProviderError(`${provider} request timed out after ${Math.round(this.timeoutMs / 1000)}s.`, provider);
+        throw new LlmProviderTimeoutError(provider, timeoutMs);
       }
       throw new LlmProviderError(error instanceof Error ? error.message : `${provider} request failed.`, provider);
     } finally {
@@ -165,7 +257,7 @@ function systemPrompt(): string {
     "You are GT Agent, a read-only Galactic Tycoons operations analyst.",
     "Use only the provided snapshot and deterministic analysis.",
     "Recommend manual actions and prepared checklists. Do not claim actions were executed.",
-    "Return one valid JSON object matching the requested shape. No markdown."
+    "Return one valid JSON object matching the requested LLM draft shape. No markdown."
   ].join(" ");
 }
 
@@ -175,11 +267,18 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
     snapshotSummary: summarizeSnapshot(input.snapshot),
     deterministicSitrep: {
       summary: input.deterministicSitrep.summary,
-      actionPlans: input.deterministicSitrep.actionPlans,
-      marketSignals: input.deterministicSitrep.marketSignals,
-      stockoutRisks: input.deterministicSitrep.stockoutRisks,
-      expansionCandidates: input.deterministicSitrep.expansionCandidates,
-      logisticsMoves: input.deterministicSitrep.logisticsMoves,
+      counts: {
+        actionPlans: input.deterministicSitrep.actionPlans.length,
+        marketSignals: input.deterministicSitrep.marketSignals.length,
+        stockoutRisks: input.deterministicSitrep.stockoutRisks.length,
+        expansionCandidates: input.deterministicSitrep.expansionCandidates.length,
+        logisticsMoves: input.deterministicSitrep.logisticsMoves.length
+      },
+      topActionPlans: input.deterministicSitrep.actionPlans.slice(0, 5).map(compactActionPlan),
+      topMarketSignals: input.deterministicSitrep.marketSignals.slice(0, 8).map(compactMarketSignal),
+      topStockoutRisks: input.deterministicSitrep.stockoutRisks.slice(0, 8).map(compactStockoutRisk),
+      topExpansionCandidates: input.deterministicSitrep.expansionCandidates.slice(0, 6).map(compactExpansionCandidate),
+      topLogisticsMoves: input.deterministicSitrep.logisticsMoves.slice(0, 6).map(compactLogisticsMove),
       warnings: input.deterministicSitrep.warnings
     }
   };
@@ -187,10 +286,11 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
   return [
     validationHint,
     input.planningContext.userPrompt ? `The player request to answer first: ${input.planningContext.userPrompt}` : "",
-    "Create the final SitrepResponse JSON with these top-level keys:",
-    "generatedAt, provider, model, summary, actionPlans, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, warnings.",
-    "preparedCommands must always include executable:false.",
-    "Keep rawSnapshot out of your JSON; the server will attach it.",
+    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, actionPlans, warnings.",
+    "Do not return provider, model, generatedAt, rawSnapshot, marketSignals, stockoutRisks, expansionCandidates, or logisticsMoves.",
+    "Use only the compact top deterministic signals below; the server has the full dashboard data.",
+    "The server will preserve deterministic market, operations, logistics, and expansion data.",
+    "preparedCommands must always include executable:false. Return an empty actionPlans array if you cannot improve the deterministic action plans.",
     JSON.stringify(compact)
   ].filter(Boolean).join("\n\n");
 }
@@ -227,6 +327,76 @@ function summarizeSnapshot(snapshot: GameSnapshot) {
   };
 }
 
+function compactActionPlan(plan: SitrepResponse["actionPlans"][number]) {
+  return {
+    id: plan.id,
+    title: plan.title,
+    priority: plan.priority,
+    category: plan.category,
+    expectedBenefit: plan.expectedBenefit,
+    costSummary: plan.costSummary,
+    risk: plan.risk,
+    evidence: plan.evidence.slice(0, 4),
+    preparedCommands: plan.preparedCommands.slice(0, 2).map((command) => ({
+      type: command.type,
+      title: command.title,
+      executable: command.executable,
+      payload: command.payload,
+      steps: command.steps.slice(0, 5)
+    }))
+  };
+}
+
+function compactMarketSignal(signal: SitrepResponse["marketSignals"][number]) {
+  return {
+    matId: signal.matId,
+    matName: signal.matName,
+    currentPrice: signal.currentPrice,
+    avgPrice: signal.avgPrice,
+    spreadPct: signal.spreadPct,
+    trend: signal.trend,
+    recommendation: signal.recommendation,
+    rationale: signal.rationale.slice(0, 3)
+  };
+}
+
+function compactStockoutRisk(risk: SitrepResponse["stockoutRisks"][number]) {
+  return {
+    matId: risk.matId,
+    matName: risk.matName,
+    availableQty: risk.availableQty,
+    requiredQty: risk.requiredQty,
+    shortageQty: risk.shortageQty,
+    hoursUntilStockout: risk.hoursUntilStockout,
+    severity: risk.severity,
+    affectedBases: risk.affectedBases.slice(0, 5)
+  };
+}
+
+function compactExpansionCandidate(candidate: SitrepResponse["expansionCandidates"][number]) {
+  return {
+    title: candidate.title,
+    type: candidate.type,
+    priority: candidate.priority,
+    estimatedCost: candidate.estimatedCost,
+    blockers: candidate.blockers.slice(0, 4),
+    rationale: candidate.rationale.slice(0, 4)
+  };
+}
+
+function compactLogisticsMove(move: SitrepResponse["logisticsMoves"][number]) {
+  return {
+    from: move.from,
+    to: move.to,
+    matId: move.matId,
+    materialName: move.materialName,
+    quantity: move.quantity,
+    tonnes: move.tonnes,
+    reason: move.reason,
+    steps: move.steps.slice(0, 5)
+  };
+}
+
 function parseJsonObject(text: string): unknown {
   const trimmed = text.trim();
   try {
@@ -239,6 +409,39 @@ function parseJsonObject(text: string): unknown {
     }
     throw new Error("Provider response did not contain a JSON object.");
   }
+}
+
+function extractOpenAiResponseText(body: Record<string, any>): string | undefined {
+  if (typeof body.output_text === "string" && body.output_text.trim()) return body.output_text;
+  if (!Array.isArray(body.output)) return undefined;
+
+  const text = body.output
+    .flatMap((item: unknown) => isRecord(item) && Array.isArray(item.content) ? item.content : [])
+    .map((part: unknown) => isRecord(part) && typeof part.text === "string" ? part.text : "")
+    .join("");
+
+  return text.trim() ? text : undefined;
+}
+
+function mergeWarnings(base: string[], draft: string[]): string[] {
+  return [...new Set([...base, ...draft])];
+}
+
+function numberEnv(name: string): number | undefined {
+  const raw = process.env[name];
+  if (!raw) return undefined;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
+
+function providerLabel(provider: Provider): string {
+  if (provider === "openai") return "OpenAI";
+  if (provider === "anthropic") return "Anthropic";
+  return "Gemini";
+}
+
+function formatTimeout(timeoutMs: number): string {
+  return timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
 }
 
 async function parseProviderResponse(response: Response, provider: Provider): Promise<Record<string, any>> {

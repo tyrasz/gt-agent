@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { FastifyInstance } from "fastify";
 import { buildDeterministicSitrep } from "../analysis.js";
 import { createApp } from "../index.js";
+import { RestLlmPlanner } from "../llm/providers.js";
 import { SessionStore } from "../sessionStore.js";
 import { makeSnapshot } from "./fixtures.js";
 
@@ -131,5 +132,138 @@ describe("API integration", () => {
     expect(models.statusCode).toBe(400);
     expect(models.body).toContain("No anthropic API key");
     expect(models.body).not.toContain("sk-secret-key");
+  });
+
+  it("merges an LLM draft with deterministic dashboard data", async () => {
+    const snapshot = makeSnapshot();
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async () => snapshot
+      } as any,
+      llmPlanner: new RestLlmPlanner({
+        fetchImpl: async () => Response.json({
+          output_text: JSON.stringify({
+            summary: "LLM summary focused on restocking.",
+            actionPlans: [],
+            warnings: ["Provider caveat."]
+          })
+        })
+      })
+    });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const sitrep = await app.inject({
+      method: "POST",
+      url: "/api/agent/sitrep",
+      headers: { cookie: String(keys.headers["set-cookie"]) },
+      payload: {
+        provider: "openai",
+        model: "gpt-5.5",
+        planningContext: context
+      }
+    });
+
+    const body = sitrep.json();
+    const deterministic = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5.5");
+    expect(sitrep.statusCode).toBe(200);
+    expect(body.diagnostics.source).toBe("llm");
+    expect(body.summary).toBe("LLM summary focused on restocking.");
+    expect(body.actionPlans).toHaveLength(deterministic.actionPlans.length);
+    expect(body.marketSignals).toHaveLength(deterministic.marketSignals.length);
+    expect(body.expansionCandidates).toHaveLength(deterministic.expansionCandidates.length);
+    expect(body.warnings).toContain("Provider caveat.");
+  });
+
+  it("returns deterministic output when provider draft validation fails", async () => {
+    const snapshot = makeSnapshot();
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async () => snapshot
+      } as any,
+      llmPlanner: new RestLlmPlanner({
+        fetchImpl: async () => Response.json({ output_text: JSON.stringify({ actionPlans: [], warnings: [] }) })
+      })
+    });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const sitrep = await app.inject({
+      method: "POST",
+      url: "/api/agent/sitrep",
+      headers: { cookie: String(keys.headers["set-cookie"]) },
+      payload: {
+        provider: "openai",
+        model: "gpt-5.5",
+        planningContext: context
+      }
+    });
+
+    const body = sitrep.json();
+    expect(sitrep.statusCode).toBe(200);
+    expect(body.diagnostics.source).toBe("deterministic");
+    expect(body.warnings.join(" ")).toContain("LLM provider unavailable or invalid");
+    expect(body.marketSignals.length).toBeGreaterThan(0);
+  });
+
+  it("returns deterministic output with an actionable OpenAI timeout warning", async () => {
+    const snapshot = makeSnapshot();
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async () => snapshot
+      } as any,
+      llmPlanner: new RestLlmPlanner({
+        timeoutMsByProvider: { openai: 5 },
+        fetchImpl: async (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          })
+      })
+    });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const sitrep = await app.inject({
+      method: "POST",
+      url: "/api/agent/sitrep",
+      headers: { cookie: String(keys.headers["set-cookie"]) },
+      payload: {
+        provider: "openai",
+        model: "gpt-5.5",
+        planningContext: context
+      }
+    });
+
+    const body = sitrep.json();
+    expect(sitrep.statusCode).toBe(200);
+    expect(body.diagnostics.source).toBe("deterministic");
+    expect(body.warnings.join(" ")).toContain("OpenAI did not respond within 5ms; showing deterministic sitrep. Try a faster model or increase timeout.");
+    expect(body.warnings.join(" ")).not.toContain("LLM provider unavailable or invalid");
   });
 });
