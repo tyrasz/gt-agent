@@ -343,9 +343,24 @@ textarea {
   padding: 16px;
 }
 
-.warning-row {
+.warning-row,
+.diagnostic-row {
   color: #986315;
   gap: 8px;
+}
+
+.diagnostic-row {
+  color: #536066;
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 0.78rem;
+}
+
+.diagnostic-row span {
+  background: #f8faf8;
+  border: 1px solid #dde4df;
+  border-radius: 999px;
+  padding: 6px 9px;
 }
 
 .action-card,

@@ -173,6 +173,11 @@ export const sitrepResponseSchema = z.object({
   expansionCandidates: z.array(expansionCandidateSchema),
   logisticsMoves: z.array(logisticsMoveSchema),
   warnings: z.array(z.string()).default([]),
+  diagnostics: z.object({
+    source: z.enum(["llm", "deterministic"]),
+    timingsMs: z.record(z.number()),
+    llmMessage: z.string().optional()
+  }).optional(),
   rawSnapshot: gameSnapshotSchema.optional()
 });
 export type SitrepResponse = z.infer<typeof sitrepResponseSchema>;

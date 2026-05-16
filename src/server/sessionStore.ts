@@ -12,6 +12,13 @@ export type AgentSession = {
   updatedAt: number;
 };
 
+export class MissingProviderKeyError extends Error {
+  constructor(readonly provider: Provider) {
+    super(`No ${provider} API key is available in this session.`);
+    this.name = "MissingProviderKeyError";
+  }
+}
+
 export class SessionStore {
   private readonly sessions = new Map<string, AgentSession>();
 
@@ -47,7 +54,7 @@ export class SessionStore {
   requireProviderKey(session: AgentSession, provider: Provider): string {
     const key = session.providerKeys[provider];
     if (!key) {
-      throw new Error(`No ${provider} API key is available in this session.`);
+      throw new MissingProviderKeyError(provider);
     }
     return key;
   }

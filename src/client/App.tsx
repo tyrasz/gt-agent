@@ -129,7 +129,10 @@ export default function App() {
         })
       });
       const body = await response.json().catch(() => ({}));
-      if (!response.ok) throw new Error(body.error ?? "Could not generate sitrep.");
+      if (!response.ok) {
+        const detail = body.details?.endpoint ? ` (${body.details.endpoint})` : "";
+        throw new Error(`${body.error ?? "Could not generate sitrep."}${detail}`);
+      }
       setSitrep(body);
       setActiveTab("sitrep");
     } catch (error) {
@@ -455,6 +458,14 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
           <div className="warning-row">
             <AlertTriangle size={18} />
             <span>{sitrep.warnings.join(" ")}</span>
+          </div>
+        ) : null}
+        {sitrep.diagnostics ? (
+          <div className="diagnostic-row">
+            <span>Pipeline: {sitrep.diagnostics.source}</span>
+            <span>GT {Math.round(sitrep.diagnostics.timingsMs.snapshot ?? 0)} ms</span>
+            <span>LLM {Math.round(sitrep.diagnostics.timingsMs.llm ?? 0)} ms</span>
+            <span>Total {Math.round(sitrep.diagnostics.timingsMs.total ?? 0)} ms</span>
           </div>
         ) : null}
       </section>

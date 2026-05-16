@@ -7,6 +7,7 @@ const GAME_DATA_TTL_MS = 24 * 60 * 60 * 1000;
 const MARKET_DETAILS_TTL_MS = 5 * 60 * 1000;
 const MARKET_PRICES_TTL_MS = 60 * 1000;
 const COMPANY_TTL_MS = 30 * 1000;
+const DEFAULT_GT_FETCH_TIMEOUT_MS = 20_000;
 
 export class RateLimitError extends Error {
   constructor(
@@ -19,11 +20,23 @@ export class RateLimitError extends Error {
   }
 }
 
+export class GtApiError extends Error {
+  constructor(
+    message: string,
+    readonly endpoint: string,
+    readonly status?: number
+  ) {
+    super(message);
+    this.name = "GtApiError";
+  }
+}
+
 export type FetchLike = typeof fetch;
 
 export type GtClientOptions = {
   baseUrl?: string;
   fetchImpl?: FetchLike;
+  timeoutMs?: number;
 };
 
 type SnapshotCacheValue = Omit<GameSnapshot, "fetchedAt">;
@@ -31,6 +44,7 @@ type SnapshotCacheValue = Omit<GameSnapshot, "fetchedAt">;
 export class GalacticTycoonsClient {
   private readonly baseUrl: string;
   private readonly fetchImpl: FetchLike;
+  private readonly timeoutMs: number;
   private readonly gameDataCache = new TtlCache<Record<string, unknown>>();
   private readonly marketPricesCache = new TtlCache<Record<string, unknown>[]>();
   private readonly marketDetailsCache = new TtlCache<Record<string, unknown>[]>();
@@ -39,6 +53,7 @@ export class GalacticTycoonsClient {
   constructor(options: GtClientOptions = {}) {
     this.baseUrl = options.baseUrl ?? GT_BASE_URL;
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.GT_FETCH_TIMEOUT_MS ?? DEFAULT_GT_FETCH_TIMEOUT_MS);
   }
 
   async getSnapshot(session: AgentSession, refresh?: RefreshOptions): Promise<GameSnapshot> {
@@ -49,9 +64,18 @@ export class GalacticTycoonsClient {
     const rateLimits: RateLimitInfo[] = [];
 
     const [gameData, prices, details, companyParts] = await Promise.all([
-      this.getGameData(Boolean(refresh?.forceGameData)),
-      this.getMarketPrices(session.gtApiKey, Boolean(refresh?.forceMarket)),
-      this.getMarketDetails(session.gtApiKey, Boolean(refresh?.forceMarket)),
+      this.getGameData(Boolean(refresh?.forceGameData)).catch((error) => {
+        warnings.push(`Could not load game data: ${describeGtError(error)}.`);
+        return {};
+      }),
+      this.getMarketPrices(session.gtApiKey, Boolean(refresh?.forceMarket)).catch((error) => {
+        warnings.push(`Could not load exchange prices: ${describeGtError(error)}.`);
+        return { value: [], rateLimits: [] };
+      }),
+      this.getMarketDetails(session.gtApiKey, Boolean(refresh?.forceMarket)).catch((error) => {
+        warnings.push(`Could not load exchange details: ${describeGtError(error)}.`);
+        return { value: [], rateLimits: [] };
+      }),
       cachedCompany ? Promise.resolve(cachedCompany) : this.getCompanyParts(session.gtApiKey)
     ]);
 
@@ -149,7 +173,7 @@ export class GalacticTycoonsClient {
         } catch (error) {
           if (key === "company") throw error;
           result[key] = [];
-          warnings.push(`Could not load ${key}; continuing with an empty set.`);
+          warnings.push(`Could not load ${key}: ${describeGtError(error)}. Continuing with an empty set.`);
         }
       })
     );
@@ -171,9 +195,23 @@ export class GalacticTycoonsClient {
   }
 
   private async fetchJson<T>(endpoint: string, apiKey?: string): Promise<{ body: T; rateLimit?: RateLimitInfo }> {
-    const response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
-      headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined
-    });
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+    let response: Response;
+
+    try {
+      response = await this.fetchImpl(`${this.baseUrl}${endpoint}`, {
+        headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : undefined,
+        signal: controller.signal
+      });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new GtApiError(`Galactic Tycoons request timed out after ${Math.round(this.timeoutMs / 1000)}s.`, endpoint, 504);
+      }
+      throw new GtApiError(error instanceof Error ? error.message : "Galactic Tycoons request failed.", endpoint);
+    } finally {
+      clearTimeout(timeout);
+    }
 
     const rateLimit = parseRateLimit(endpoint, response.headers);
     if (response.status === 429) {
@@ -188,11 +226,25 @@ export class GalacticTycoonsClient {
       } catch {
         // Keep the status-based message.
       }
-      throw new Error(message);
+      throw new GtApiError(message, endpoint, response.status);
     }
 
     return { body: (await response.json()) as T, rateLimit };
   }
+}
+
+function describeGtError(error: unknown): string {
+  if (error instanceof RateLimitError) {
+    return `${error.message}${error.retryAfterSeconds ? ` Retry after ${error.retryAfterSeconds}s` : ""}`;
+  }
+  if (error instanceof GtApiError) {
+    return `${error.message}${error.status ? ` (${error.status})` : ""}`;
+  }
+  return error instanceof Error ? error.message : "unknown error";
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function parseRateLimit(endpoint: string, headers: Headers): RateLimitInfo | undefined {

@@ -34,7 +34,7 @@ describe("GalacticTycoonsClient", () => {
     expect(snapshot.rateLimits.some((info) => info.remaining === 123 && info.resetSeconds === 44)).toBe(true);
   });
 
-  it("throws a typed error on GT rate limits", async () => {
+  it("degrades when market endpoints are rate limited", async () => {
     const client = new GalacticTycoonsClient({
       baseUrl: "https://gt.test",
       fetchImpl: async (input) => {
@@ -45,7 +45,24 @@ describe("GalacticTycoonsClient", () => {
       }
     });
 
-    await expect(client.getSnapshot(session, { forceMarket: true })).rejects.toBeInstanceOf(RateLimitError);
+    const snapshot = await client.getSnapshot(session, { forceMarket: true });
+
+    expect(snapshot.market.prices).toEqual([]);
+    expect(snapshot.warnings.some((warning) => warning.includes("rate limit exceeded"))).toBe(true);
+  });
+
+  it("throws a typed error when the required company endpoint is rate limited", async () => {
+    const client = new GalacticTycoonsClient({
+      baseUrl: "https://gt.test",
+      fetchImpl: async (input) => {
+        if (String(input).endsWith("/public/company")) {
+          return Response.json({}, { status: 429, headers: { "Retry-After": "30" } });
+        }
+        return Response.json(bodyFor(String(input)));
+      }
+    });
+
+    await expect(client.getSnapshot(session, { forceCompany: true })).rejects.toBeInstanceOf(RateLimitError);
   });
 });
 

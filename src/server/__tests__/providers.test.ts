@@ -37,4 +37,28 @@ describe("RestLlmPlanner", () => {
     expect(result.summary).toContain("Prioritize");
     expect(result.rawSnapshot?.company.name).toBe("Stellar Foundry");
   });
+
+  it("throws a provider error when OpenAI times out", async () => {
+    const planner = new RestLlmPlanner({
+      timeoutMs: 5,
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        })
+    });
+
+    const snapshot = makeSnapshot();
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+
+    await expect(planner.generateStructuredPlan({
+      provider: "openai",
+      model: "test-model",
+      providerApiKey: "sk-test",
+      planningContext: context,
+      snapshot,
+      deterministicSitrep
+    })).rejects.toThrow("timed out");
+  });
 });

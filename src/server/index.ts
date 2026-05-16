@@ -4,7 +4,7 @@ import fastify, { type FastifyInstance } from "fastify";
 import staticPlugin from "@fastify/static";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { GalacticTycoonsClient, RateLimitError } from "./gtClient.js";
+import { GalacticTycoonsClient, GtApiError, RateLimitError } from "./gtClient.js";
 import { RestLlmPlanner } from "./llm/providers.js";
 import { redactError, redactSecrets } from "./redact.js";
 import { SessionStore } from "./sessionStore.js";
@@ -78,6 +78,13 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
         return reply.code(429).send({
           error: error.message,
           details: { endpoint: error.endpoint, retryAfterSeconds: error.retryAfterSeconds }
+        });
+      }
+      if (error instanceof GtApiError) {
+        const statusCode = error.status === 401 || error.status === 403 ? 401 : 502;
+        return reply.code(statusCode).send({
+          error: error.message,
+          details: { endpoint: error.endpoint, status: error.status }
         });
       }
       request.log.error({ error: redactError(error) }, "sitrep generation failed");

@@ -16,7 +16,10 @@ export type LlmPlanner = {
 
 export type LlmPlannerOptions = {
   fetchImpl?: typeof fetch;
+  timeoutMs?: number;
 };
+
+const DEFAULT_LLM_TIMEOUT_MS = 30_000;
 
 export class LlmProviderError extends Error {
   constructor(message: string, readonly provider: Provider, readonly status?: number) {
@@ -27,18 +30,32 @@ export class LlmProviderError extends Error {
 
 export class RestLlmPlanner implements LlmPlanner {
   private readonly fetchImpl: typeof fetch;
+  private readonly timeoutMs: number;
 
   constructor(options: LlmPlannerOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? Number(process.env.LLM_TIMEOUT_MS ?? DEFAULT_LLM_TIMEOUT_MS);
   }
 
   async generateStructuredPlan(input: StructuredPlanInput): Promise<SitrepResponse> {
     let validationHint = "";
+    let lastValidationError = "";
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const prompt = buildPrompt(input, validationHint);
-      const text = await this.callProvider(input, prompt);
-      const parsedJson = parseJsonObject(text);
+      let text: string;
+      let parsedJson: unknown;
+
+      try {
+        text = await this.callProvider(input, prompt);
+        parsedJson = parseJsonObject(text);
+      } catch (error) {
+        if (error instanceof LlmProviderError) throw error;
+        lastValidationError = error instanceof Error ? error.message : "Provider response could not be parsed.";
+        validationHint = `The previous response could not be parsed as JSON: ${lastValidationError}`;
+        continue;
+      }
+
       const parsed = sitrepResponseSchema.safeParse(parsedJson);
       if (parsed.success) {
         return {
@@ -49,10 +66,11 @@ export class RestLlmPlanner implements LlmPlanner {
           warnings: [...input.deterministicSitrep.warnings, ...parsed.data.warnings]
         };
       }
-      validationHint = `The previous JSON failed validation: ${parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ")}`;
+      lastValidationError = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
+      validationHint = `The previous JSON failed validation: ${lastValidationError}`;
     }
 
-    throw new LlmProviderError("Provider returned JSON that did not match the sitrep schema.", input.provider);
+    throw new LlmProviderError(`Provider returned JSON that did not match the sitrep schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider);
   }
 
   private async callProvider(input: StructuredPlanInput, prompt: string): Promise<string> {
@@ -62,7 +80,7 @@ export class RestLlmPlanner implements LlmPlanner {
   }
 
   private async callOpenAi(input: StructuredPlanInput, prompt: string): Promise<string> {
-    const response = await this.fetchImpl("https://api.openai.com/v1/chat/completions", {
+    const response = await this.fetchProvider(input.provider, "https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${input.providerApiKey}`,
@@ -85,7 +103,7 @@ export class RestLlmPlanner implements LlmPlanner {
   }
 
   private async callAnthropic(input: StructuredPlanInput, prompt: string): Promise<string> {
-    const response = await this.fetchImpl("https://api.anthropic.com/v1/messages", {
+    const response = await this.fetchProvider(input.provider, "https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "x-api-key": input.providerApiKey,
@@ -108,7 +126,7 @@ export class RestLlmPlanner implements LlmPlanner {
 
   private async callGemini(input: StructuredPlanInput, prompt: string): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(input.model)}:generateContent?key=${encodeURIComponent(input.providerApiKey)}`;
-    const response = await this.fetchImpl(url, {
+    const response = await this.fetchProvider(input.provider, url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -123,6 +141,22 @@ export class RestLlmPlanner implements LlmPlanner {
     const text = body.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("");
     if (typeof text !== "string" || text.length === 0) throw new LlmProviderError("Gemini response did not include text content.", input.provider, response.status);
     return text;
+  }
+
+  private async fetchProvider(provider: Provider, url: string, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
+
+    try {
+      return await this.fetchImpl(url, { ...init, signal: controller.signal });
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new LlmProviderError(`${provider} request timed out after ${Math.round(this.timeoutMs / 1000)}s.`, provider);
+      }
+      throw new LlmProviderError(error instanceof Error ? error.message : `${provider} request failed.`, provider);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
@@ -225,4 +259,8 @@ async function parseProviderResponse(response: Response, provider: Provider): Pr
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === "AbortError";
 }

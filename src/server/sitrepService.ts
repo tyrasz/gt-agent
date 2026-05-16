@@ -2,7 +2,7 @@ import { buildDeterministicSitrep } from "./analysis.js";
 import type { GalacticTycoonsClient } from "./gtClient.js";
 import type { LlmPlanner } from "./llm/providers.js";
 import { LlmProviderError } from "./llm/providers.js";
-import type { AgentSession, SessionStore } from "./sessionStore.js";
+import { MissingProviderKeyError, type AgentSession, type SessionStore } from "./sessionStore.js";
 import type { SitrepRequest, SitrepResponse } from "../shared/schemas.js";
 
 export class SitrepService {
@@ -13,12 +13,16 @@ export class SitrepService {
   ) {}
 
   async generate(session: AgentSession, request: SitrepRequest): Promise<SitrepResponse> {
+    const totalStartedAt = Date.now();
     const snapshot = await this.gtClient.getSnapshot(session, request.refresh);
+    const snapshotMs = Date.now() - totalStartedAt;
     const deterministic = buildDeterministicSitrep(snapshot, request.planningContext, request.provider, request.model);
-    const providerApiKey = this.sessions.requireProviderKey(session, request.provider);
+    const deterministicMs = Date.now() - totalStartedAt - snapshotMs;
+    const llmStartedAt = Date.now();
 
     try {
-      return await this.llmPlanner.generateStructuredPlan({
+      const providerApiKey = this.sessions.requireProviderKey(session, request.provider);
+      const response = await this.llmPlanner.generateStructuredPlan({
         provider: request.provider,
         model: request.model,
         providerApiKey,
@@ -26,11 +30,37 @@ export class SitrepService {
         snapshot,
         deterministicSitrep: deterministic
       });
+
+      return {
+        ...response,
+        diagnostics: {
+          source: "llm",
+          timingsMs: {
+            snapshot: snapshotMs,
+            deterministic: deterministicMs,
+            llm: Date.now() - llmStartedAt,
+            total: Date.now() - totalStartedAt
+          }
+        }
+      };
     } catch (error) {
-      if (error instanceof LlmProviderError) {
+      if (error instanceof LlmProviderError || error instanceof MissingProviderKeyError) {
+        const llmMessage = error instanceof MissingProviderKeyError
+          ? `No ${request.provider} API key is stored in this session. Start a new session with that provider key to use the model.`
+          : error.message;
         return {
           ...deterministic,
-          warnings: [...deterministic.warnings, `LLM provider unavailable or invalid; showing deterministic sitrep. ${error.message}`]
+          diagnostics: {
+            source: "deterministic",
+            timingsMs: {
+              snapshot: snapshotMs,
+              deterministic: deterministicMs,
+              llm: Date.now() - llmStartedAt,
+              total: Date.now() - totalStartedAt
+            },
+            llmMessage
+          },
+          warnings: [...deterministic.warnings, `LLM provider unavailable or invalid; showing deterministic sitrep. ${llmMessage}`]
         };
       }
       throw error;
