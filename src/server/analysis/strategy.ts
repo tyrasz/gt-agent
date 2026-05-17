@@ -141,12 +141,13 @@ function buildActionPlans(
     if (signal.recommendation !== "buy" && signal.recommendation !== "sell") continue;
 
     const cashImpactPct = signal.cashImpactPct ?? 0;
+    const materiality = scoreMarketMateriality(signal);
     const breakdown = {
       urgency: signal.netNeedQty && signal.netNeedQty > 0 ? 65 : 25,
       companyFit: scoreCompanyFit(signal, context),
       profitPotential: scoreProfit(signal),
       marketConfidence: scoreMarketConfidence(signal),
-      feasibility: signal.recommendation === "buy" ? scoreCashFeasibility(cashImpactPct, context.cashRiskLevel) : 80,
+      feasibility: signal.recommendation === "buy" ? scoreCashFeasibility(cashImpactPct, context.cashRiskLevel) : clamp(45 + materiality * 0.45),
       goalAlignment: scoreGoalAlignment(context, intent, signal.matName, signal.recommendation)
     };
     const score = weightedScore(breakdown);
@@ -158,12 +159,12 @@ function buildActionPlans(
       expectedBenefit: signal.recommendation === "buy" ? "Covers a company-specific need or profitable recipe input at favorable pricing." : "Captures above-average market pricing on inventory you can actually sell.",
       costSummary: signal.recommendation === "buy"
         ? `${formatMoney(signal.currentPrice)} current, ${signal.netNeedQty ? `${Math.ceil(signal.netNeedQty).toLocaleString()} net needed` : "speculative recipe input"}.`
-        : `${Math.ceil(signal.ownedQty ?? 0).toLocaleString()} owned, ${formatPct(signal.spreadPct)} above average.`,
+        : `${Math.ceil(signal.ownedQty ?? 0).toLocaleString()} owned, ${formatPct(signal.spreadPct)} above average; spread value about ${formatMoney(signal.spreadValue ?? 0)}${signal.materialityPct !== undefined ? ` (${formatPct(signal.materialityPct)} of cash)` : ""}.`,
       risk: (signal.volatilityPct ?? 0) > 25 ? "High volatility means this should be checked manually before committing." : "Market price and order depth can change before manual execution.",
       evidence: signal.rationale,
       whyNow: signal.recommendation === "buy"
         ? `${signal.matName} is tied to current demand or a profitable recipe, not just a cheap headline price.`
-        : `${signal.matName} has positive spread and visible owned inventory or sell exposure.`,
+        : `${signal.matName} has positive spread, visible owned inventory, and enough absolute premium value to pass the company materiality gate.`,
       bestWhen: signal.recommendation === "buy" ? "Use this when the in-game price is still near the snapshot and the material feeds current demand or a strong recipe." : "Use this when visible bids or cheapest listings still support the above-average repricing.",
       avoidIf: signal.recommendation === "buy" ? "Avoid if this is only cheap with no confirmed demand, recipe margin, or prompt match." : "Avoid if you no longer own the material or listed depth collapsed.",
       whatWouldChangeThis: "A new exchange refresh with changed depth, trend, or volatility can move this below operational work.",
@@ -863,7 +864,7 @@ function scoreUrgency(risk: StockoutRisk): number {
 function scoreCompanyFit(signal: MarketSignal, context: PlayerPlanningContext): number {
   const prompt = `${context.shortTermGoal} ${context.userPrompt ?? ""}`.toLowerCase();
   if ((signal.netNeedQty ?? 0) > 0) return 95;
-  if (signal.recommendation === "sell" && (signal.ownedQty ?? 0) > 0) return 85;
+  if (signal.recommendation === "sell" && (signal.ownedQty ?? 0) > 0) return clamp(45 + scoreMarketMateriality(signal) * 0.5);
   if ((signal.recipeMarginPct ?? 0) >= 25 && prompt.includes(signal.matName.toLowerCase())) return 75;
   if ((signal.recipeMarginPct ?? 0) >= 25 && context.cashRiskLevel === "aggressive") return 55;
   return 20;
@@ -871,7 +872,15 @@ function scoreCompanyFit(signal: MarketSignal, context: PlayerPlanningContext): 
 
 function scoreProfit(signal: MarketSignal): number {
   const spread = signal.recommendation === "sell" ? Math.max(0, signal.spreadPct) : Math.max(0, -signal.spreadPct);
-  return clamp(spread + Math.max(0, signal.recipeMarginPct ?? 0));
+  const materiality = signal.recommendation === "sell" ? scoreMarketMateriality(signal) : 0;
+  return clamp(spread * 0.35 + materiality * 0.65 + Math.max(0, signal.recipeMarginPct ?? 0));
+}
+
+function scoreMarketMateriality(signal: MarketSignal): number {
+  const pctScore = clamp((signal.materialityPct ?? 0) * 16);
+  const grossScore = clamp((signal.grossCashImpactPct ?? 0) * 4);
+  const absoluteScore = clamp(((signal.spreadValue ?? 0) / 100_000) * 60);
+  return round(pctScore * 0.45 + grossScore * 0.25 + absoluteScore * 0.3);
 }
 
 function scoreMarketConfidence(signal: MarketSignal | undefined): number {

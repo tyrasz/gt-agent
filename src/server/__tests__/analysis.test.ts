@@ -437,6 +437,70 @@ describe("analysis", () => {
     expect(result.actionPlans.some((plan) => plan.title === "Reprice Platinum Foam")).toBe(false);
   });
 
+  it("keeps percentage-only repricing watch-only when the absolute premium is immaterial", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.company.cash = 158_882_622;
+    snapshot.gameData.materials = [
+      ...(snapshot.gameData.materials as Record<string, unknown>[]),
+      { id: 30, name: "Grain", weight: 1, cp: 1200 }
+    ];
+    snapshot.warehouses[0].mats = [{ id: 30, qty: 5_098 }];
+    snapshot.market.prices.push({ matId: 30, matName: "Grain", currentPrice: 1550, avgPrice: 1291 });
+    snapshot.market.details.push({
+      matId: 30,
+      matName: "Grain",
+      currentPrice: 1550,
+      avgPrice: 1291,
+      totalQtyAvailable: 8_000,
+      avgQtySoldDaily: 5_000,
+      priceHistory: [
+        { avgPrice: 1550, qtySold: 5_000 },
+        { avgPrice: 1291, qtySold: 4_000 }
+      ]
+    });
+
+    const result = analyzeSnapshot(snapshot, { ...context, shortTermGoal: "Find the highest-impact actions" });
+    const grain = result.marketSignals.find((signal) => signal.matName === "Grain");
+
+    expect(grain?.spreadPct).toBe(20.06);
+    expect(grain?.spreadValue).toBe(1_320_382);
+    expect(grain?.materialityPct).toBe(0.83);
+    expect(grain?.recommendation).toBe("watch");
+    expect(result.actionPlans.some((plan) => plan.title === "Reprice Grain")).toBe(false);
+    expect(result.decisionPanel.actions.some((action) => action.title === "Reprice Grain")).toBe(false);
+  });
+
+  it("still promotes repricing when the same spread has material dollar impact", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.company.cash = 158_882_622;
+    snapshot.gameData.materials = [
+      ...(snapshot.gameData.materials as Record<string, unknown>[]),
+      { id: 30, name: "Grain", weight: 1, cp: 1200 }
+    ];
+    snapshot.warehouses[0].mats = [{ id: 30, qty: 20_000 }];
+    snapshot.market.prices.push({ matId: 30, matName: "Grain", currentPrice: 1550, avgPrice: 1291 });
+    snapshot.market.details.push({
+      matId: 30,
+      matName: "Grain",
+      currentPrice: 1550,
+      avgPrice: 1291,
+      totalQtyAvailable: 80_000,
+      avgQtySoldDaily: 20_000,
+      priceHistory: [
+        { avgPrice: 1550, qtySold: 20_000 },
+        { avgPrice: 1291, qtySold: 18_000 }
+      ]
+    });
+
+    const result = analyzeSnapshot(snapshot, { ...context, shortTermGoal: "Find the highest-impact actions" });
+    const grain = result.marketSignals.find((signal) => signal.matName === "Grain");
+
+    expect(grain?.spreadValue).toBe(5_180_000);
+    expect(grain?.materialityPct ?? 0).toBeGreaterThan(3);
+    expect(grain?.recommendation).toBe("sell");
+    expect(result.actionPlans.some((plan) => plan.title === "Reprice Grain")).toBe(true);
+  });
+
   it("never creates a logistics move from a base back to the same base", () => {
     const snapshot = cloneSnapshot(makeSnapshot());
     snapshot.wishlists = [{ id: 101, title: "Forge Prime", mats: [{ id: 1, qty: 500 }] }];

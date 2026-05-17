@@ -20,6 +20,10 @@ export type MarketPosition = {
   ownedQty: number;
   neededQty: number;
   netNeedQty: number;
+  grossValue?: number;
+  spreadValue?: number;
+  materialityPct?: number;
+  grossCashImpactPct?: number;
   cashImpactPct?: number;
   hasSellExposure: boolean;
 };
@@ -50,6 +54,14 @@ export function computeMarketPositions(snapshot: GameSnapshot, normalized: Norma
       const ownedQty = inventory?.totalQty ?? 0;
       const netNeedQty = Math.max(0, neededQty - ownedQty);
       const cashImpactPct = normalized.cash > 0 && currentPrice > 0 && netNeedQty > 0 ? round(((currentPrice * netNeedQty) / normalized.cash) * 100) : undefined;
+      const sellGrossValue = currentPrice > 0 && ownedQty > 0 ? round(currentPrice * ownedQty) : undefined;
+      const sellSpreadValue = currentPrice > 0 && avgPrice > 0 && ownedQty > 0 ? round(Math.max(0, currentPrice - avgPrice) * ownedQty) : undefined;
+      const buyGrossValue = currentPrice > 0 && netNeedQty > 0 ? round(currentPrice * netNeedQty) : undefined;
+      const buySpreadValue = currentPrice > 0 && avgPrice > 0 && netNeedQty > 0 ? round(Math.max(0, avgPrice - currentPrice) * netNeedQty) : undefined;
+      const grossValue = sellGrossValue ?? buyGrossValue;
+      const spreadValue = sellSpreadValue ?? buySpreadValue;
+      const materialityPct = normalized.cash > 0 && spreadValue !== undefined ? round((spreadValue / normalized.cash) * 100) : undefined;
+      const grossCashImpactPct = normalized.cash > 0 && grossValue !== undefined ? round((grossValue / normalized.cash) * 100) : undefined;
 
       return {
         matId,
@@ -68,6 +80,10 @@ export function computeMarketPositions(snapshot: GameSnapshot, normalized: Norma
         ownedQty,
         neededQty,
         netNeedQty: round(netNeedQty),
+        grossValue,
+        spreadValue,
+        materialityPct,
+        grossCashImpactPct,
         cashImpactPct,
         hasSellExposure: ownedQty > 0 || hasExchangeOrder(snapshot.exchangeOrders, matId)
       } satisfies MarketPosition;
@@ -85,6 +101,7 @@ export function computeMarketSignals(snapshot: GameSnapshot, normalized: Normali
         position.currentPrice > 0 && position.avgPrice > 0 ? `${formatMoney(position.currentPrice)} current vs ${formatMoney(position.avgPrice)} recent average (${formatPct(position.spreadPct)}).` : "No reliable current/average price pair is available.",
         position.avgQtySoldDaily !== undefined ? `${Math.round(position.avgQtySoldDaily).toLocaleString()} avg units sold daily with ${position.daysMarketSupply ?? "unknown"} days of visible supply.` : "No daily sales velocity was reported.",
         position.netNeedQty > 0 ? `${Math.ceil(position.netNeedQty).toLocaleString()} net needed by current production/wishlist demand.` : `${Math.ceil(position.ownedQty).toLocaleString()} owned and no near-term net need detected.`,
+        position.spreadValue !== undefined ? `Premium/discount value is about ${formatMoney(position.spreadValue)}${position.materialityPct !== undefined ? ` (${formatPct(position.materialityPct)} of visible cash)` : ""}.` : "No material dollar impact could be estimated for the spread.",
         position.recipeMarginPct !== undefined ? `Best recipe margin estimate is ${formatPct(position.recipeMarginPct)} before logistics/time costs.` : "No direct recipe margin estimate was available."
       ];
 
@@ -99,6 +116,10 @@ export function computeMarketSignals(snapshot: GameSnapshot, normalized: Normali
         ownedQty: position.ownedQty,
         neededQty: position.neededQty,
         netNeedQty: position.netNeedQty,
+        grossValue: position.grossValue,
+        spreadValue: position.spreadValue,
+        materialityPct: position.materialityPct,
+        grossCashImpactPct: position.grossCashImpactPct,
         daysMarketSupply: position.daysMarketSupply,
         liquidityScore: position.liquidityScore,
         trendConfidence: position.trendConfidence,
@@ -122,9 +143,20 @@ function marketRecommendation(position: MarketPosition, context: PlayerPlanningC
     if (position.spreadPct <= 10 && position.cashImpactPct !== undefined && position.cashImpactPct < cashRiskLimit(context.cashRiskLevel)) return "buy";
     return "restock";
   }
-  if (position.hasSellExposure && position.spreadPct >= 18 && position.liquidityScore >= 25) return "sell";
+  if (position.hasSellExposure && position.spreadPct >= 18 && position.liquidityScore >= 25 && isMaterialSellOpportunity(position, context, promptMentions)) return "sell";
   if ((position.recipeMarginPct ?? 0) >= 25 && position.spreadPct <= -10 && (context.cashRiskLevel === "aggressive" || promptMentions)) return "buy";
   return "watch";
+}
+
+function isMaterialSellOpportunity(position: MarketPosition, context: PlayerPlanningContext, promptMentions: boolean): boolean {
+  if (promptMentions) return true;
+  const premiumPct = position.materialityPct ?? 0;
+  const grossPct = position.grossCashImpactPct ?? 0;
+  const premiumValue = position.spreadValue ?? 0;
+  const minPremiumPct = context.cashRiskLevel === "conservative" ? 1.5 : context.cashRiskLevel === "aggressive" ? 0.5 : 1;
+  const minGrossPct = context.cashRiskLevel === "conservative" ? 5 : context.cashRiskLevel === "aggressive" ? 2 : 3;
+  const minPremiumValue = context.cashRiskLevel === "conservative" ? 50_000 : context.cashRiskLevel === "aggressive" ? 7_500 : 25_000;
+  return premiumPct >= minPremiumPct && grossPct >= minGrossPct && premiumValue >= minPremiumValue;
 }
 
 function hasExchangeOrder(orders: Record<string, unknown>[], matId: number): boolean {
@@ -136,13 +168,20 @@ function hasExchangeOrder(orders: Record<string, unknown>[], matId: number): boo
 
 function marketOpportunityScore(position: MarketPosition): number {
   const needBonus = position.netNeedQty > 0 ? 35 : 0;
-  const sellBonus = position.hasSellExposure && position.spreadPct > 0 ? 20 : 0;
-  return needBonus + sellBonus + Math.abs(position.spreadPct) + position.liquidityScore / 2 + Math.max(0, position.recipeMarginPct ?? 0) - (position.volatilityPct ?? 0) / 2;
+  const sellBonus = position.hasSellExposure && position.spreadPct > 0 ? materialityScore(position) * 0.45 : 0;
+  return needBonus + sellBonus + Math.abs(position.spreadPct) * 0.6 + position.liquidityScore / 2 + Math.max(0, position.recipeMarginPct ?? 0) - (position.volatilityPct ?? 0) / 2;
 }
 
 function signalScore(signal: MarketSignal): number {
-  const fit = (signal.netNeedQty ?? 0) > 0 || signal.recommendation === "sell" ? 40 : 0;
-  return fit + Math.abs(signal.spreadPct) + (signal.liquidityScore ?? 0) / 2 + Math.max(0, signal.recipeMarginPct ?? 0) - (signal.volatilityPct ?? 0) / 2;
+  const fit = (signal.netNeedQty ?? 0) > 0 ? 40 : signal.recommendation === "sell" ? 20 + materialityScore(signal) * 0.35 : 0;
+  return fit + Math.abs(signal.spreadPct) * 0.6 + (signal.liquidityScore ?? 0) / 2 + Math.max(0, signal.recipeMarginPct ?? 0) - (signal.volatilityPct ?? 0) / 2;
+}
+
+function materialityScore(value: Pick<MarketPosition, "materialityPct" | "grossCashImpactPct" | "spreadValue">): number {
+  const pctScore = clamp((value.materialityPct ?? 0) * 16);
+  const grossScore = clamp((value.grossCashImpactPct ?? 0) * 4);
+  const absoluteScore = clamp(((value.spreadValue ?? 0) / 100_000) * 60);
+  return round(pctScore * 0.45 + grossScore * 0.25 + absoluteScore * 0.3);
 }
 
 function computeLiquidityScore(avgQtySoldDaily?: number, totalQtyAvailable?: number, daysMarketSupply?: number): number {

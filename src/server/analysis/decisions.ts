@@ -134,7 +134,7 @@ function exchangeDecision(
     ? Math.max(0, signal.avgPrice - signal.currentPrice)
     : Math.max(0, signal.currentPrice - signal.avgPrice);
   const expectedValue = priceDelta > 0 ? round(priceDelta * quantity) : undefined;
-  const cashImpactPct = buy ? signal.cashImpactPct : undefined;
+  const cashImpactPct = buy ? signal.cashImpactPct : signal.materialityPct;
   const score = plan?.score ?? exchangeScore(signal, context);
   const blockers = exchangeBlockers(signal, quantity, context);
   const requirements: DecisionRequirement[] = [{
@@ -161,7 +161,7 @@ function exchangeDecision(
     evidence: [
       ...signal.rationale.slice(0, 4),
       plan?.whyNow,
-      buy ? `Cash impact is ${cashImpactPct !== undefined ? formatPct(cashImpactPct) : "unknown"}.` : `${quantity.toLocaleString()} units are visible for repricing.`
+      buy ? `Cash impact is ${cashImpactPct !== undefined ? formatPct(cashImpactPct) : "unknown"}.` : `${quantity.toLocaleString()} units are visible for repricing with about ${formatMoney(expectedValue ?? 0)} premium value${cashImpactPct !== undefined ? ` (${formatPct(cashImpactPct)} of cash)` : ""}.`
     ].filter((item): item is string => Boolean(item)),
     preparedCommands: plan?.preparedCommands.length ? plan.preparedCommands : [exchangeCommand(signal, quantity)]
   };
@@ -418,12 +418,19 @@ function exchangeBlockers(signal: MarketSignal, quantity: number, context: Playe
 }
 
 function exchangeScore(signal: MarketSignal, context: PlayerPlanningContext): number {
-  const fit = signal.recommendation === "sell" || (signal.netNeedQty ?? 0) > 0 ? 82 : 45;
+  const fit = signal.recommendation === "sell" ? clamp(50 + marketMaterialityScore(signal) * 0.35) : (signal.netNeedQty ?? 0) > 0 ? 82 : 45;
   const spread = signal.recommendation === "buy" ? Math.max(0, -signal.spreadPct) : Math.max(0, signal.spreadPct);
   const cash = signal.recommendation === "buy" && signal.cashImpactPct !== undefined
     ? signal.cashImpactPct <= cashRiskLimit(context.cashRiskLevel) ? 80 : 25
-    : 75;
-  return round(clamp(fit * 0.34 + spread * 0.22 + (signal.liquidityScore ?? 25) * 0.2 + cash * 0.16 + (signal.trendConfidence ?? 30) * 0.08));
+    : signal.recommendation === "sell" ? marketMaterialityScore(signal) : 75;
+  return round(clamp(fit * 0.34 + spread * 0.16 + (signal.liquidityScore ?? 25) * 0.2 + cash * 0.22 + (signal.trendConfidence ?? 30) * 0.08));
+}
+
+function marketMaterialityScore(signal: MarketSignal): number {
+  const pctScore = clamp((signal.materialityPct ?? 0) * 16);
+  const grossScore = clamp((signal.grossCashImpactPct ?? 0) * 4);
+  const absoluteScore = clamp(((signal.spreadValue ?? 0) / 100_000) * 60);
+  return round(pctScore * 0.45 + grossScore * 0.25 + absoluteScore * 0.3);
 }
 
 function exchangeCommand(signal: MarketSignal, quantity: number): PreparedCommand {

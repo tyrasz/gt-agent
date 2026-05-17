@@ -542,6 +542,8 @@ function DashboardTab({
             <dl>
               <div><dt>Current</dt><dd>{money(signal.currentPrice)}</dd></div>
               <div><dt>Spread</dt><dd>{signal.spreadPct}%</dd></div>
+              <div><dt>Spread value</dt><dd>{signal.spreadValue !== undefined ? money(signal.spreadValue) : "n/a"}</dd></div>
+              <div><dt>Materiality</dt><dd>{signal.materialityPct !== undefined ? `${signal.materialityPct}% cash` : "n/a"}</dd></div>
               <div><dt>Need</dt><dd>{Math.ceil(signal.netNeedQty ?? 0).toLocaleString()}</dd></div>
               <div><dt>Liquidity</dt><dd>{Math.round(signal.liquidityScore ?? 0)}</dd></div>
             </dl>
