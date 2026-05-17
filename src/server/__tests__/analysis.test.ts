@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { GameSnapshot } from "../../shared/schemas.js";
 import { analyzeSnapshot, buildDeterministicSitrep } from "../analysis.js";
+import { normalizeSnapshot } from "../analysis/normalizers.js";
+import { computeProfitability } from "../analysis/profitability.js";
+import { classifyPlanningIntent } from "../analysis/strategy.js";
 import { makeSnapshot } from "./fixtures.js";
 
 const context = {
@@ -10,6 +13,16 @@ const context = {
 };
 
 describe("analysis", () => {
+  it("classifies planning intent from the player prompt and context", () => {
+    expect(classifyPlanningIntent({ ...context, userPrompt: "How do I increase my CV?" })).toBe("cv_growth");
+    expect(classifyPlanningIntent({ ...context, userPrompt: "Find market profit and repricing moves." })).toBe("market_profit");
+    expect(classifyPlanningIntent({ ...context, userPrompt: "Restock inputs before my next login." })).toBe("production_stability");
+    expect(classifyPlanningIntent({ ...context, userPrompt: "Plan ship cargo transfers." })).toBe("logistics");
+    expect(classifyPlanningIntent({ ...context, userPrompt: "Should I expand a base?" })).toBe("expansion");
+    expect(classifyPlanningIntent({ ...context, userPrompt: "Audit risk before spending." })).toBe("risk_review");
+    expect(classifyPlanningIntent({ ...context, shortTermGoal: "Assess current state", userPrompt: "Give me a sitrep." })).toBe("general_sitrep");
+  });
+
   it("computes market signals and stockout-driven action plans", () => {
     const result = analyzeSnapshot(makeSnapshot(), context);
 
@@ -29,18 +42,134 @@ describe("analysis", () => {
     expect(sitrep.rawSnapshot?.company.name).toBe("Stellar Foundry");
     expect(sitrep.actionPlans.length).toBeGreaterThan(0);
     expect(sitrep.situation?.production.summary).toContain("material risks");
+    expect(sitrep.decisionBrief.thesis).toContain("Stellar Foundry");
+    expect(sitrep.decisionBrief.recommendedPath.length).toBeGreaterThan(0);
+    expect(sitrep.projections.horizons.map((horizon) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(sitrep.marketSignals[0]).toHaveProperty("liquidityScore");
+    expect(sitrep.profitability?.companyFit.length).toBeGreaterThan(0);
+    expect(sitrep.profitability?.globalTargets.length).toBeGreaterThan(0);
+  });
+
+  it("computes recipe profitability from market prices and CP fallback", () => {
+    const snapshot = makeSnapshot();
+    const normalized = normalizeSnapshot(snapshot, context);
+    const profitability = computeProfitability(snapshot, normalized, context);
+    const ironBar = profitability.recipes.find((recipe) => recipe.outputMatName === "Iron Bar");
+    const tools = profitability.recipes.find((recipe) => recipe.outputMatName === "Tools");
+
+    expect(ironBar).toMatchObject({
+      inputCostPerHour: 400_000,
+      outputValuePerHour: 600_000,
+      grossProfitPerHour: 200_000,
+      netEstimatePerHour: 200_000,
+      marginPct: 50,
+      priceConfidence: "high"
+    });
+    expect(tools?.outputValuePerHour).toBe(600_000);
+    expect(tools?.warnings.join(" ")).toContain("CP fallback");
+    expect(tools?.priceConfidence).toBe("low");
+  });
+
+  it("keeps company-fit profit opportunities ahead of global restructure targets", () => {
+    const sitrep = buildDeterministicSitrep({
+      ...makeSnapshot(),
+      wishlists: []
+    }, { ...context, userPrompt: "How do I increase CV through profit?" }, "openai", "test-model");
+
+    expect(sitrep.profitability?.companyFit[0]?.title).toContain("Iron Bar");
+    expect(sitrep.profitability?.globalTargets[0]?.title).toContain("Tools");
+    const companyPlanIndex = sitrep.actionPlans.findIndex((plan) => plan.title.includes("Iron Bar") && plan.category === "profitability");
+    const globalPlanIndex = sitrep.actionPlans.findIndex((plan) => plan.title.includes("Tools") && plan.category === "profitability");
+    expect(companyPlanIndex).toBeGreaterThanOrEqual(0);
+    expect(globalPlanIndex).toBeGreaterThanOrEqual(0);
+    expect(companyPlanIndex).toBeLessThan(globalPlanIndex);
+  });
+
+  it("projects material needs per horizon without mutating the snapshot", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.wishlists = [];
+    snapshot.warehouses[0].mats = [{ id: 1, qty: 250 }];
+    const before = JSON.stringify(snapshot);
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const next12 = sitrep.projections.materialNeeds.find((need) => need.horizonId === "h12" && need.matName === "Iron Ore");
+    const day3 = sitrep.projections.materialNeeds.find((need) => need.horizonId === "d3" && need.matName === "Iron Ore");
+
+    expect(next12?.requiredQty).toBe(100);
+    expect(next12?.netNeedQty).toBe(0);
+    expect(day3?.requiredQty).toBe(600);
+    expect(day3?.netNeedQty).toBe(350);
+    expect(JSON.stringify(snapshot)).toBe(before);
+  });
+
+  it("surfaces a 3-day shortage while keeping the 12-hour band stable", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.wishlists = [];
+    snapshot.warehouses[0].mats = [{ id: 1, qty: 250 }];
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const day3 = sitrep.projections.bands.find((band) => band.horizonId === "d3");
+
+    expect(sitrep.stockoutRisks.some((risk) => risk.matName === "Iron Ore")).toBe(false);
+    expect(day3?.materialNeeds.some((need) => need.matName === "Iron Ore" && need.netNeedQty > 0)).toBe(true);
+    expect(sitrep.actionPlans.some((plan) => plan.title === "Prepare Iron Ore coverage for 3 Days")).toBe(true);
+  });
+
+  it("keeps urgent 12-hour blockers ranked ahead of future projected work", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), context, "openai", "test-model");
+    const firstProjectedIndex = sitrep.actionPlans.findIndex((plan) => plan.id.startsWith("project-restock-"));
+    const immediateIndex = sitrep.actionPlans.findIndex((plan) => plan.id === "restock-1");
+
+    expect(immediateIndex).toBeGreaterThanOrEqual(0);
+    if (firstProjectedIndex >= 0) expect(immediateIndex).toBeLessThan(firstProjectedIndex);
+    expect(sitrep.actionPlans[immediateIndex]?.horizonLabel).toBe("Next 12h");
+  });
+
+  it("uses cash-risk preference to change long-horizon projected buy scores", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.wishlists = [];
+    snapshot.warehouses[0].mats = [{ id: 1, qty: 250 }];
+
+    const conservative = buildDeterministicSitrep(snapshot, { ...context, cashRiskLevel: "conservative" }, "openai", "test-model");
+    const aggressive = buildDeterministicSitrep(snapshot, { ...context, cashRiskLevel: "aggressive" }, "openai", "test-model");
+    const conservativePlan = conservative.actionPlans.find((plan) => plan.title === "Prepare Iron Ore coverage for 3 Days");
+    const aggressivePlan = aggressive.actionPlans.find((plan) => plan.title === "Prepare Iron Ore coverage for 3 Days");
+
+    expect(aggressivePlan?.score ?? 0).toBeGreaterThan(conservativePlan?.score ?? 0);
+  });
+
+  it("adds projection warnings when long-range data is incomplete", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), context, "openai", "test-model");
+
+    expect(sitrep.projections.warnings.join(" ")).toContain("Base-plan material requirements");
+  });
+
+  it("shapes CV growth prompts into deepen-vs-diversify decision briefs", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), {
+      ...context,
+      userPrompt: "Give me next steps to increase my CV.",
+      notes: "Should I deepen Agri 4 or diversify?"
+    }, "openai", "test-model");
+
+    expect(sitrep.decisionBrief.thesis).toMatch(/CV|value/i);
+    expect(sitrep.decisionBrief.recommendedPath.join(" ")).toMatch(/specialization|diversification|diversify/i);
+    expect(sitrep.decisionBrief.alternatives.map((item) => item.title).join(" ")).toMatch(/Deepen .*Iron Bar/);
+    expect(sitrep.decisionBrief.alternatives.map((item) => item.title).join(" ")).toMatch(/Diversify .*Tools/);
+    expect(sitrep.decisionBrief.inspectNext.join(" ")).toContain("CV growth");
+    expect(sitrep.actionPlans[0]?.bestWhen).toBeTruthy();
+    expect(sitrep.actionPlans[0]?.avoidIf).toBeTruthy();
+    expect(sitrep.actionPlans[0]?.whatWouldChangeThis).toBeTruthy();
   });
 
   it("does not rank a cheap material buy when the company has no demand or recipe use", () => {
     const snapshot = cloneSnapshot(makeSnapshot());
     snapshot.gameData.materials = [
       ...(snapshot.gameData.materials as Record<string, unknown>[]),
-      { id: 3, name: "Copper Dust", weight: 1, cp: 300 }
+      { id: 30, name: "Copper Dust", weight: 1, cp: 300 }
     ];
-    snapshot.market.prices.push({ matId: 3, matName: "Copper Dust", currentPrice: 100, avgPrice: 500 });
+    snapshot.market.prices.push({ matId: 30, matName: "Copper Dust", currentPrice: 100, avgPrice: 500 });
     snapshot.market.details.push({
-      matId: 3,
+      matId: 30,
       matName: "Copper Dust",
       currentPrice: 100,
       avgPrice: 500,

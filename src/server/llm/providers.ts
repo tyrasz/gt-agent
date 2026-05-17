@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { type Provider, type SitrepResponse } from "../../shared/schemas.js";
 import type { GameSnapshot, PlayerPlanningContext } from "../../shared/schemas.js";
+import { formatMoney, numberValue } from "../analysis/utils.js";
 
 export type StructuredPlanInput = {
   provider: Provider;
@@ -34,11 +35,27 @@ const DEFAULT_PROVIDER_TIMEOUT_MS: Record<Provider, number> = {
 
 const llmPlanDraftSchema = z.object({
   summary: z.string().trim().min(1),
+  decisionBriefNarrative: z.object({
+    thesis: z.string().trim().optional(),
+    recommendedPath: z.array(z.string()).optional(),
+    whyThisPath: z.array(z.string()).optional(),
+    alternatives: z.array(z.object({
+      title: z.string().trim().min(1),
+      pros: z.array(z.string()).optional(),
+      cons: z.array(z.string()).optional(),
+      chooseWhen: z.string().trim().optional()
+    })).optional(),
+    constraints: z.array(z.string()).optional(),
+    inspectNext: z.array(z.string()).optional()
+  }).default({}),
   actionPlanNarratives: z.array(z.object({
     id: z.string().trim().min(1),
     expectedBenefit: z.string().trim().optional(),
     risk: z.string().trim().optional(),
     whyNow: z.string().trim().optional(),
+    bestWhen: z.string().trim().optional(),
+    avoidIf: z.string().trim().optional(),
+    whatWouldChangeThis: z.string().trim().optional(),
     evidence: z.array(z.string()).optional()
   })).default([]),
   warnings: z.array(z.string()).default([])
@@ -52,6 +69,32 @@ const llmPlanDraftJsonSchema = {
       type: "string",
       description: "A concise player-facing SITREP summary answering the current request first."
     },
+    decisionBriefNarrative: {
+      type: "object",
+      description: "Narrative updates for the existing deterministic Decision Brief. Preserve the deterministic decision shape and do not invent unsupported options.",
+      additionalProperties: false,
+      properties: {
+        thesis: { type: "string" },
+        recommendedPath: { type: "array", items: { type: "string" } },
+        whyThisPath: { type: "array", items: { type: "string" } },
+        alternatives: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              title: { type: "string" },
+              pros: { type: "array", items: { type: "string" } },
+              cons: { type: "array", items: { type: "string" } },
+              chooseWhen: { type: "string" }
+            },
+            required: ["title"]
+          }
+        },
+        constraints: { type: "array", items: { type: "string" } },
+        inspectNext: { type: "array", items: { type: "string" } }
+      }
+    },
     actionPlanNarratives: {
       type: "array",
       description: "Narrative updates for existing deterministic action ids only. Do not invent new ids or reorder actions.",
@@ -63,6 +106,9 @@ const llmPlanDraftJsonSchema = {
           expectedBenefit: { type: "string" },
           risk: { type: "string" },
           whyNow: { type: "string" },
+          bestWhen: { type: "string" },
+          avoidIf: { type: "string" },
+          whatWouldChangeThis: { type: "string" },
           evidence: { type: "array", items: { type: "string" } }
         },
         required: ["id"]
@@ -74,7 +120,7 @@ const llmPlanDraftJsonSchema = {
       items: { type: "string" }
     }
   },
-  required: ["summary", "actionPlanNarratives", "warnings"]
+  required: ["summary", "decisionBriefNarrative", "actionPlanNarratives", "warnings"]
 } as const;
 
 export class LlmProviderError extends Error {
@@ -137,6 +183,7 @@ export class RestLlmPlanner implements LlmPlanner {
         return {
           ...input.deterministicSitrep,
           summary: draft.summary,
+          decisionBrief: mergeDecisionBriefNarrative(input.deterministicSitrep.decisionBrief, draft.decisionBriefNarrative),
           actionPlans: mergeActionPlanNarratives(input.deterministicSitrep.actionPlans, draft.actionPlanNarratives),
           provider: input.provider,
           model: input.model,
@@ -289,12 +336,15 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
         expansionCandidates: input.deterministicSitrep.expansionCandidates.length,
         logisticsMoves: input.deterministicSitrep.logisticsMoves.length
       },
+      decisionBrief: input.deterministicSitrep.decisionBrief,
+      projections: compactProjections(input.deterministicSitrep.projections),
+      profitability: compactProfitability(input.deterministicSitrep.profitability),
       topActionPlans: input.deterministicSitrep.actionPlans.slice(0, 5).map(compactActionPlan),
       topMarketSignals: input.deterministicSitrep.marketSignals.slice(0, 8).map(compactMarketSignal),
       topStockoutRisks: input.deterministicSitrep.stockoutRisks.slice(0, 8).map(compactStockoutRisk),
       topExpansionCandidates: input.deterministicSitrep.expansionCandidates.slice(0, 6).map(compactExpansionCandidate),
       topLogisticsMoves: input.deterministicSitrep.logisticsMoves.slice(0, 6).map(compactLogisticsMove),
-      situation: input.deterministicSitrep.situation,
+      situation: compactSituation(input.deterministicSitrep.situation),
       warnings: input.deterministicSitrep.warnings
     }
   };
@@ -302,24 +352,33 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
   return [
     validationHint,
     input.planningContext.userPrompt ? `The player request to answer first: ${input.planningContext.userPrompt}` : "",
-    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, actionPlanNarratives, warnings.",
+    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, decisionBriefNarrative, actionPlanNarratives, warnings.",
     "The deterministic strategy engine owns action ids, ranking, categories, scores, commands, and feasibility. Do not invent new action ids or reorder actions.",
-    "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, or evidence wording.",
-    "Do not return provider, model, generatedAt, rawSnapshot, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
-    "Use the situation, score breakdowns, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
+    "For decisionBriefNarrative, improve wording for the existing deterministic Decision Brief only. Do not change confidence or add alternatives whose titles are not already present.",
+    "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, bestWhen, avoidIf, whatWouldChangeThis, or evidence wording.",
+    "Use projections to explain the timeline, but do not add horizons, change projected quantities, or alter projection actionIds.",
+    "Use profitability to explain company-fit profit moves and long-horizon restructure targets, but do not change profitability calculations or rankings.",
+    "Do not return provider, model, generatedAt, rawSnapshot, profitability, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
+    "Use the situation, score breakdowns, profitability, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
+    "Money values from GT raw fields are integer cents. Use the provided display strings such as cashDisplay and costSummary in player-facing prose.",
     JSON.stringify(compact)
   ].filter(Boolean).join("\n\n");
 }
 
 function summarizeSnapshot(snapshot: GameSnapshot) {
+  const cashCents = numberValue(snapshot.company.cash);
+  const valueCents = numberValue(snapshot.company.value);
+
   return {
     fetchedAt: snapshot.fetchedAt,
     company: {
       id: snapshot.company.id,
       name: snapshot.company.name,
-      cash: snapshot.company.cash,
+      cashCents,
+      cashDisplay: cashCents !== undefined ? formatMoney(cashCents) : undefined,
       rank: snapshot.company.rank,
-      value: snapshot.company.value,
+      valueCents,
+      valueDisplay: valueCents !== undefined ? formatMoney(valueCents) : undefined,
       poSlots: snapshot.company.poSlots,
       shipSlots: snapshot.company.shipSlots
     },
@@ -351,7 +410,13 @@ function compactActionPlan(plan: SitrepResponse["actionPlans"][number]) {
     category: plan.category,
     score: plan.score,
     confidence: plan.confidence,
+    horizonLabel: plan.horizonLabel,
+    latestUsefulByHours: plan.latestUsefulByHours,
+    futureTriggers: plan.futureTriggers,
     whyNow: plan.whyNow,
+    bestWhen: plan.bestWhen,
+    avoidIf: plan.avoidIf,
+    whatWouldChangeThis: plan.whatWouldChangeThis,
     scoreBreakdown: plan.scoreBreakdown,
     expectedBenefit: plan.expectedBenefit,
     costSummary: plan.costSummary,
@@ -425,6 +490,99 @@ function compactLogisticsMove(move: SitrepResponse["logisticsMoves"][number]) {
   };
 }
 
+function compactSituation(situation: SitrepResponse["situation"]) {
+  if (!situation) return undefined;
+  return {
+    cash: {
+      status: situation.cash.status,
+      score: situation.cash.score,
+      summary: situation.cash.summary,
+      currentCents: situation.cash.current,
+      currentDisplay: situation.cash.current !== undefined ? formatMoney(situation.cash.current) : undefined,
+      trendPct: situation.cash.trendPct
+    },
+    production: situation.production,
+    logistics: situation.logistics,
+    market: situation.market,
+    expansion: situation.expansion,
+    dataQuality: situation.dataQuality
+  };
+}
+
+function compactProjections(projections: SitrepResponse["projections"]) {
+  return {
+    horizons: projections.horizons,
+    bands: projections.bands.map((band) => ({
+      horizonId: band.horizonId,
+      summary: band.summary,
+      confidence: band.confidence,
+      actionIds: band.actionIds,
+      materialNeeds: band.materialNeeds.slice(0, 3).map((need) => ({
+        matId: need.matId,
+        matName: need.matName,
+        requiredQty: need.requiredQty,
+        availableQty: need.availableQty,
+        netNeedQty: need.netNeedQty
+      })),
+      constraints: band.constraints.slice(0, 3),
+      inspectNext: band.inspectNext.slice(0, 3)
+    })),
+    warnings: projections.warnings
+  };
+}
+
+function compactProfitability(profitability: SitrepResponse["profitability"]) {
+  if (!profitability) return undefined;
+  return {
+    companyFit: profitability.companyFit.slice(0, 5).map((opportunity) => ({
+      id: opportunity.id,
+      kind: opportunity.kind,
+      recipeId: opportunity.recipeId,
+      title: opportunity.title,
+      recommendation: opportunity.recommendation,
+      horizonLabel: opportunity.horizonLabel,
+      score: opportunity.score,
+      confidence: opportunity.confidence,
+      profitPerHour: opportunity.profitPerHour,
+      profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
+      marginPct: opportunity.marginPct,
+      rationale: opportunity.rationale.slice(0, 3),
+      blockers: opportunity.blockers.slice(0, 4)
+    })),
+    globalTargets: profitability.globalTargets.slice(0, 5).map((opportunity) => ({
+      id: opportunity.id,
+      kind: opportunity.kind,
+      recipeId: opportunity.recipeId,
+      title: opportunity.title,
+      recommendation: opportunity.recommendation,
+      horizonLabel: opportunity.horizonLabel,
+      score: opportunity.score,
+      confidence: opportunity.confidence,
+      profitPerHour: opportunity.profitPerHour,
+      profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
+      marginPct: opportunity.marginPct,
+      rationale: opportunity.rationale.slice(0, 3),
+      blockers: opportunity.blockers.slice(0, 4)
+    })),
+    topRecipes: profitability.recipes.slice(0, 8).map((recipe) => ({
+      recipeId: recipe.recipeId,
+      recipeName: recipe.recipeName,
+      outputMatName: recipe.outputMatName,
+      buildingName: recipe.buildingName,
+      netEstimatePerHour: recipe.netEstimatePerHour,
+      netEstimatePerHourDisplay: `${formatMoney(recipe.netEstimatePerHour)}/h`,
+      marginPct: recipe.marginPct,
+      inputCoveragePct: recipe.inputCoveragePct,
+      liquidityScore: recipe.liquidityScore,
+      companyFit: recipe.companyFit,
+      setupGaps: recipe.setupGaps.slice(0, 4),
+      confidence: recipe.priceConfidence
+    })),
+    assumptions: profitability.assumptions,
+    warnings: profitability.warnings.slice(0, 5)
+  };
+}
+
 function parseJsonObject(text: string): unknown {
   const trimmed = text.trim();
   try {
@@ -455,9 +613,50 @@ function mergeWarnings(base: string[], draft: string[]): string[] {
   return [...new Set([...base, ...draft])];
 }
 
+function mergeDecisionBriefNarrative(
+  brief: SitrepResponse["decisionBrief"],
+  narrative: {
+    thesis?: string;
+    recommendedPath?: string[];
+    whyThisPath?: string[];
+    alternatives?: Array<{ title: string; pros?: string[]; cons?: string[]; chooseWhen?: string }>;
+    constraints?: string[];
+    inspectNext?: string[];
+  }
+): SitrepResponse["decisionBrief"] {
+  const alternativesByTitle = new Map((narrative.alternatives ?? []).map((alternative) => [alternative.title, alternative]));
+  return {
+    ...brief,
+    thesis: narrative.thesis || brief.thesis,
+    recommendedPath: narrative.recommendedPath?.length ? narrative.recommendedPath : brief.recommendedPath,
+    whyThisPath: narrative.whyThisPath?.length ? narrative.whyThisPath : brief.whyThisPath,
+    constraints: narrative.constraints?.length ? narrative.constraints : brief.constraints,
+    inspectNext: narrative.inspectNext?.length ? narrative.inspectNext : brief.inspectNext,
+    alternatives: brief.alternatives.map((alternative) => {
+      const update = alternativesByTitle.get(alternative.title);
+      if (!update) return alternative;
+      return {
+        ...alternative,
+        pros: update.pros?.length ? update.pros : alternative.pros,
+        cons: update.cons?.length ? update.cons : alternative.cons,
+        chooseWhen: update.chooseWhen || alternative.chooseWhen
+      };
+    })
+  };
+}
+
 function mergeActionPlanNarratives(
   plans: SitrepResponse["actionPlans"],
-  narratives: Array<{ id: string; expectedBenefit?: string; risk?: string; whyNow?: string; evidence?: string[] }>
+  narratives: Array<{
+    id: string;
+    expectedBenefit?: string;
+    risk?: string;
+    whyNow?: string;
+    bestWhen?: string;
+    avoidIf?: string;
+    whatWouldChangeThis?: string;
+    evidence?: string[];
+  }>
 ): SitrepResponse["actionPlans"] {
   const byId = new Map(narratives.map((narrative) => [narrative.id, narrative]));
   return plans.map((plan) => {
@@ -468,6 +667,9 @@ function mergeActionPlanNarratives(
       expectedBenefit: narrative.expectedBenefit || plan.expectedBenefit,
       risk: narrative.risk || plan.risk,
       whyNow: narrative.whyNow || plan.whyNow,
+      bestWhen: narrative.bestWhen || plan.bestWhen,
+      avoidIf: narrative.avoidIf || plan.avoidIf,
+      whatWouldChangeThis: narrative.whatWouldChangeThis || plan.whatWouldChangeThis,
       evidence: narrative.evidence?.length ? [...new Set([...plan.evidence, ...narrative.evidence])].slice(0, 6) : plan.evidence
     };
   });

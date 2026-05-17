@@ -66,8 +66,13 @@ describe("API integration", () => {
       }
     });
 
+    const body = sitrep.json();
     expect(sitrep.statusCode).toBe(200);
-    expect(sitrep.json().rawSnapshot.company.name).toBe("Stellar Foundry");
+    expect(body.rawSnapshot.company.name).toBe("Stellar Foundry");
+    expect(body.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
+    expect(body.projections.bands).toHaveLength(4);
+    expect(body.profitability.companyFit.length).toBeGreaterThan(0);
+    expect(body.actionPlans.some((plan: { category: string }) => plan.category === "profitability")).toBe(true);
     expect(observedRefresh).toEqual({ forceCompany: true, forceMarket: true, forceGameData: false });
     expect(observedPlanningContext).toMatchObject({ userPrompt: "Find the best restock move." });
   });
@@ -145,6 +150,9 @@ describe("API integration", () => {
         fetchImpl: async () => Response.json({
           output_text: JSON.stringify({
             summary: "LLM summary focused on restocking.",
+            decisionBriefNarrative: {
+              thesis: "LLM thesis still follows the deterministic brief."
+            },
             actionPlanNarratives: [
               {
                 id: "restock-1",
@@ -182,6 +190,8 @@ describe("API integration", () => {
     expect(sitrep.statusCode).toBe(200);
     expect(body.diagnostics.source).toBe("llm");
     expect(body.summary).toBe("LLM summary focused on restocking.");
+    expect(body.decisionBrief.thesis).toBe("LLM thesis still follows the deterministic brief.");
+    expect(body.decisionBrief.confidence).toBe(deterministic.decisionBrief.confidence);
     expect(body.actionPlans).toHaveLength(deterministic.actionPlans.length);
     expect(body.actionPlans[0].score).toBeTypeOf("number");
     expect(body.actionPlans[0].scoreBreakdown).toBeTruthy();
@@ -189,7 +199,9 @@ describe("API integration", () => {
     expect(body.marketSignals).toHaveLength(deterministic.marketSignals.length);
     expect(body.marketSignals[0]).toHaveProperty("ownedQty");
     expect(body.marketSignals[0]).toHaveProperty("liquidityScore");
+    expect(body.profitability).toEqual(deterministic.profitability);
     expect(body.expansionCandidates).toHaveLength(deterministic.expansionCandidates.length);
+    expect(body.projections).toEqual(deterministic.projections);
     expect(body.situation).toBeTruthy();
     expect(body.warnings).toContain("Provider caveat.");
   });

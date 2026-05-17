@@ -14,6 +14,20 @@ export type MaterialInfo = {
 
 export type MaterialCatalog = Map<number, MaterialInfo>;
 
+export type BuildingInfo = {
+  id: number;
+  name: string;
+  industry?: string;
+  tier?: number;
+  requiredResearch?: number;
+  recipesIds: number[];
+  workersNeeded: number[];
+  constructionMaterials: Array<{ matId: number; quantity: number }>;
+  cost?: number;
+};
+
+export type BuildingCatalog = Map<number, BuildingInfo>;
+
 export type InventoryLocation = {
   warehouseId?: number;
   warehouseName: string;
@@ -38,6 +52,8 @@ export type DemandPosition = {
   matId: number;
   matName: string;
   requiredQty: number;
+  wishlistQty: number;
+  productionQtyPer12h: number;
   affectedBases: string[];
   reasons: string[];
   planningHorizonHours: number;
@@ -57,6 +73,9 @@ export type WarehousePosition = {
 export type NormalizedSnapshot = {
   companyName: string;
   materials: MaterialCatalog;
+  buildings: BuildingCatalog;
+  ownedBuildingIds: Set<number>;
+  activeRecipeIds: Set<number>;
   inventory: Map<number, InventoryPosition>;
   demand: Map<number, DemandPosition>;
   warehouses: WarehousePosition[];
@@ -70,10 +89,15 @@ export type NormalizedSnapshot = {
 
 export function normalizeSnapshot(snapshot: GameSnapshot, context: PlayerPlanningContext): NormalizedSnapshot {
   const materials = buildMaterialCatalog(snapshot);
+  const buildings = buildBuildingCatalog(snapshot);
   const warehouses = buildWarehousePositions(snapshot, materials);
+  const activeRecipeIds = buildActiveRecipeIds(snapshot);
   return {
     companyName: text(snapshot.company.name) || "your company",
     materials,
+    buildings,
+    ownedBuildingIds: buildOwnedBuildingIds(snapshot, buildings, activeRecipeIds),
+    activeRecipeIds,
     warehouses,
     inventory: buildInventoryPositions(snapshot, materials),
     demand: buildDemandPositions(snapshot, context, materials),
@@ -118,6 +142,72 @@ function buildMaterialCatalog(snapshot: GameSnapshot): MaterialCatalog {
   }
 
   return materials;
+}
+
+function buildBuildingCatalog(snapshot: GameSnapshot): BuildingCatalog {
+  const buildings = new Map<number, BuildingInfo>();
+  for (const item of recordArray(snapshot.gameData.buildings)) {
+    const id = numberValue(item.id) ?? 0;
+    if (!id) continue;
+    const recipesIds = (Array.isArray(item.recipesIds) ? item.recipesIds : [])
+      .map((recipe) => numberValue(recipe))
+      .filter((recipeId): recipeId is number => Boolean(recipeId));
+    const workersNeeded = Array.isArray(item.workersNeeded)
+      ? item.workersNeeded.map((worker) => numberValue(worker) ?? 0)
+      : [];
+    const constructionMaterials = recordArray(item.constructionMaterials)
+      .map((mat) => ({ matId: materialId(mat) ?? 0, quantity: materialQuantity(mat) }))
+      .filter((mat) => mat.matId > 0 && mat.quantity > 0);
+    buildings.set(id, {
+      id,
+      name: text(item.name) || `Building ${id}`,
+      industry: industryName(numberValue(item.specialization)),
+      tier: numberValue(item.tier),
+      requiredResearch: numberValue(item.requiredResearch) ?? numberValue(item.reqTech),
+      recipesIds,
+      workersNeeded,
+      constructionMaterials,
+      cost: numberValue(item.cost)
+    });
+  }
+  return buildings;
+}
+
+function buildActiveRecipeIds(snapshot: GameSnapshot): Set<number> {
+  const ids = new Set<number>();
+  for (const base of snapshot.bases) {
+    for (const order of recordArray(base.productionOrders)) {
+      const nestedRecipe = recordValue(order.recipe);
+      const recipeId = numberValue(order.recipeId) ?? numberValue(order.rId) ?? numberValue(nestedRecipe?.id);
+      if (recipeId) ids.add(recipeId);
+    }
+  }
+  return ids;
+}
+
+function buildOwnedBuildingIds(snapshot: GameSnapshot, buildings: BuildingCatalog, activeRecipeIds: Set<number>): Set<number> {
+  const ids = new Set<number>();
+
+  for (const recipeId of activeRecipeIds) {
+    for (const building of buildings.values()) {
+      if (building.recipesIds.includes(recipeId)) ids.add(building.id);
+    }
+  }
+
+  for (const base of snapshot.bases) {
+    for (const candidate of [
+      ...recordArray(base.buildings),
+      ...recordArray(base.slots),
+      ...recordArray(base.buildingSlots),
+      ...recordArray(base.facilities)
+    ]) {
+      const nested = recordValue(candidate.building);
+      const id = numberValue(candidate.buildingId) ?? numberValue(candidate.bId) ?? numberValue(candidate.typeId) ?? numberValue(nested?.id);
+      if (id && buildings.has(id)) ids.add(id);
+    }
+  }
+
+  return ids;
 }
 
 function buildInventoryPositions(snapshot: GameSnapshot, materials: MaterialCatalog): Map<number, InventoryPosition> {
@@ -169,7 +259,7 @@ function buildDemandPositions(snapshot: GameSnapshot, context: PlayerPlanningCon
 
   for (const wishlist of snapshot.wishlists) {
     const title = text(wishlist.title) || `Wishlist ${numberValue(wishlist.id) ?? "?"}`;
-    for (const mat of recordArray(wishlist.mats)) addDemand(demand, mat, materials, title, `Wishlist ${title}`, 1, context.autonomyHours);
+    for (const mat of recordArray(wishlist.mats)) addDemand(demand, mat, materials, title, `Wishlist ${title}`, 1, context.autonomyHours, "wishlist");
   }
 
   const recipesById = new Map<number, Record<string, unknown>>();
@@ -186,13 +276,15 @@ function buildDemandPositions(snapshot: GameSnapshot, context: PlayerPlanningCon
       const recipeId = numberValue(order.recipeId) ?? numberValue(order.rId) ?? numberValue(nestedRecipe?.id);
       const recipe = recipeId ? recipesById.get(recipeId) : undefined;
       for (const input of recordArray(recipe?.inputs)) {
-        addDemand(demand, input, materials, baseName, `Production recipe ${recipeId ?? "unknown"} at ${baseName}`, planningMultiplier, context.autonomyHours);
+        addDemand(demand, input, materials, baseName, `Production recipe ${recipeId ?? "unknown"} at ${baseName}`, planningMultiplier, context.autonomyHours, "production");
       }
     }
   }
 
   for (const position of demand.values()) {
     position.requiredQty = round(position.requiredQty);
+    position.wishlistQty = round(position.wishlistQty);
+    position.productionQtyPer12h = round(position.productionQtyPer12h);
   }
 
   return demand;
@@ -205,20 +297,26 @@ function addDemand(
   affectedBase: string,
   reason: string,
   multiplier: number,
-  planningHorizonHours: number
+  planningHorizonHours: number,
+  sourceType: "wishlist" | "production"
 ): void {
   const matId = materialId(mat);
-  const quantity = materialQuantity(mat) * multiplier;
-  if (!matId || quantity <= 0) return;
+  const baseQuantity = materialQuantity(mat);
+  const quantity = baseQuantity * multiplier;
+  if (!matId || baseQuantity <= 0 || quantity <= 0) return;
   const entry = demand.get(matId) ?? {
     matId,
     matName: materials.get(matId)?.name ?? text(mat.matName) ?? text(mat.name) ?? `Material ${matId}`,
     requiredQty: 0,
+    wishlistQty: 0,
+    productionQtyPer12h: 0,
     affectedBases: [],
     reasons: [],
     planningHorizonHours
   };
   entry.requiredQty += quantity;
+  if (sourceType === "wishlist") entry.wishlistQty += baseQuantity;
+  if (sourceType === "production") entry.productionQtyPer12h += baseQuantity;
   if (!entry.affectedBases.includes(affectedBase)) entry.affectedBases.push(affectedBase);
   if (!entry.reasons.includes(reason)) entry.reasons.push(reason);
   demand.set(matId, entry);
@@ -243,6 +341,19 @@ function buildWarehousePositions(snapshot: GameSnapshot, materials: MaterialCata
       freeTonnes: cap && cap > 0 ? round(Math.max(0, cap - usedTonnes)) : undefined
     };
   });
+}
+
+function industryName(id?: number): string | undefined {
+  if (id === 1) return "Construction";
+  if (id === 2) return "Manufacturing";
+  if (id === 3) return "Agriculture";
+  if (id === 4) return "Resource Extraction";
+  if (id === 5) return "Metallurgy";
+  if (id === 6) return "Chemistry";
+  if (id === 7) return "Electronics";
+  if (id === 8) return "Food Production";
+  if (id === 9) return "Science";
+  return undefined;
 }
 
 export function materialId(mat: Record<string, unknown>): number | undefined {

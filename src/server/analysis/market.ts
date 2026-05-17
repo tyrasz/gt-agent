@@ -1,6 +1,6 @@
-import type { GameSnapshot, MarketSignal, PlayerPlanningContext } from "../../shared/schemas.js";
+import type { GameSnapshot, MarketSignal, PlayerPlanningContext, ProfitabilitySet } from "../../shared/schemas.js";
 import type { NormalizedSnapshot } from "./normalizers.js";
-import { materialId, materialQuantity } from "./normalizers.js";
+import { profitabilityMarginByMaterial } from "./profitability.js";
 import { clamp, formatMoney, formatPct, numberValue, recordArray, round, text } from "./utils.js";
 
 export type MarketPosition = {
@@ -24,8 +24,8 @@ export type MarketPosition = {
   hasSellExposure: boolean;
 };
 
-export function computeMarketPositions(snapshot: GameSnapshot, normalized: NormalizedSnapshot): MarketPosition[] {
-  const recipeMargins = computeRecipeMargins(snapshot, normalized);
+export function computeMarketPositions(snapshot: GameSnapshot, normalized: NormalizedSnapshot, profitability?: ProfitabilitySet): MarketPosition[] {
+  const recipeMargins = profitability ? profitabilityMarginByMaterial(profitability) : new Map<number, number>();
   const details = snapshot.market.details.length > 0 ? snapshot.market.details : snapshot.market.prices;
 
   return details
@@ -77,8 +77,8 @@ export function computeMarketPositions(snapshot: GameSnapshot, normalized: Norma
     .slice(0, 32);
 }
 
-export function computeMarketSignals(snapshot: GameSnapshot, normalized: NormalizedSnapshot, context: PlayerPlanningContext): MarketSignal[] {
-  return computeMarketPositions(snapshot, normalized)
+export function computeMarketSignals(snapshot: GameSnapshot, normalized: NormalizedSnapshot, context: PlayerPlanningContext, profitability?: ProfitabilitySet): MarketSignal[] {
+  return computeMarketPositions(snapshot, normalized, profitability)
     .map((position) => {
       const recommendation = marketRecommendation(position, context);
       const rationale = [
@@ -112,41 +112,6 @@ export function computeMarketSignals(snapshot: GameSnapshot, normalized: Normali
     })
     .sort((a, b) => signalScore(b) - signalScore(a))
     .slice(0, 24);
-}
-
-function computeRecipeMargins(snapshot: GameSnapshot, normalized: NormalizedSnapshot): Map<number, number> {
-  const prices = new Map<number, number>();
-  for (const item of snapshot.market.prices) {
-    const matId = numberValue(item.matId) ?? numberValue(item.id);
-    const price = numberValue(item.currentPrice);
-    if (matId && price && price > 0) prices.set(matId, price);
-  }
-
-  const best = new Map<number, number>();
-  for (const recipe of recordArray(snapshot.gameData.recipes)) {
-    const output = recipe.output && typeof recipe.output === "object" && !Array.isArray(recipe.output) ? recipe.output as Record<string, unknown> : undefined;
-    const outputId = output ? materialId(output) : undefined;
-    const outputAmount = output ? materialQuantity(output) || 1 : 1;
-    if (!outputId) continue;
-    const outputPrice = prices.get(outputId) ?? normalized.materials.get(outputId)?.cp;
-    if (!outputPrice) continue;
-    const inputCost = recordArray(recipe.inputs).reduce((sum, input) => {
-      const inputId = materialId(input);
-      const amount = materialQuantity(input);
-      const price = inputId ? prices.get(inputId) ?? normalized.materials.get(inputId)?.cp ?? 0 : 0;
-      return sum + price * amount;
-    }, 0);
-    if (inputCost <= 0) continue;
-    const revenue = outputPrice * outputAmount;
-    const marginPct = round(((revenue - inputCost) / inputCost) * 100);
-    best.set(outputId, Math.max(best.get(outputId) ?? -Infinity, marginPct));
-    for (const input of recordArray(recipe.inputs)) {
-      const inputId = materialId(input);
-      if (!inputId) continue;
-      best.set(inputId, Math.max(best.get(inputId) ?? -Infinity, marginPct));
-    }
-  }
-  return best;
 }
 
 function marketRecommendation(position: MarketPosition, context: PlayerPlanningContext): MarketSignal["recommendation"] {

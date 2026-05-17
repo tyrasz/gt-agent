@@ -50,6 +50,7 @@ export const cashRiskLevelSchema = z.enum(["conservative", "balanced", "aggressi
 export const playerPlanningContextSchema = z.object({
   nextLoginAt: z.string().trim().optional(),
   autonomyHours: z.number().min(1).max(168),
+  projectionHours: z.array(z.number().min(1).max(168)).min(1).max(6).optional(),
   cashRiskLevel: cashRiskLevelSchema,
   shortTermGoal: z.string().trim().min(2).max(240),
   userPrompt: z.string().trim().max(2000).optional(),
@@ -119,6 +120,60 @@ export const marketSignalSchema = z.object({
 });
 export type MarketSignal = z.infer<typeof marketSignalSchema>;
 
+export const profitabilityRecipeSchema = z.object({
+  recipeId: z.number(),
+  recipeName: z.string(),
+  outputMatId: z.number(),
+  outputMatName: z.string(),
+  inputMatIds: z.array(z.number()).default([]),
+  buildingId: z.number().optional(),
+  buildingName: z.string().optional(),
+  industry: z.string().optional(),
+  inputCostPerHour: z.number(),
+  outputValuePerHour: z.number(),
+  grossProfitPerHour: z.number(),
+  workerConsumableCostPerHour: z.number().optional(),
+  netEstimatePerHour: z.number(),
+  marginPct: z.number().optional(),
+  profitPer100Burden: z.number().optional(),
+  outputUnitsPerHour: z.number(),
+  inputCoveragePct: z.number(),
+  liquidityScore: z.number(),
+  priceConfidence: z.enum(["low", "medium", "high"]),
+  companyFit: z.enum(["owned", "active", "available", "target"]),
+  setupCostEstimate: z.number().optional(),
+  setupGaps: z.array(z.string()).default([]),
+  warnings: z.array(z.string()).default([])
+});
+export type ProfitabilityRecipe = z.infer<typeof profitabilityRecipeSchema>;
+
+export const profitabilityOpportunitySchema = z.object({
+  id: z.string(),
+  kind: z.enum(["run_now", "stage_inputs", "reprice_output", "expand_for_recipe", "restructure_toward"]),
+  recipeId: z.number(),
+  title: z.string(),
+  recommendation: z.string(),
+  horizonId: z.string(),
+  horizonLabel: z.string(),
+  score: z.number(),
+  confidence: z.enum(["low", "medium", "high"]),
+  profitPerHour: z.number(),
+  marginPct: z.number().optional(),
+  rationale: z.array(z.string()).default([]),
+  blockers: z.array(z.string()).default([]),
+  actionId: z.string().optional()
+});
+export type ProfitabilityOpportunity = z.infer<typeof profitabilityOpportunitySchema>;
+
+export const profitabilitySetSchema = z.object({
+  recipes: z.array(profitabilityRecipeSchema).default([]),
+  companyFit: z.array(profitabilityOpportunitySchema).default([]),
+  globalTargets: z.array(profitabilityOpportunitySchema).default([]),
+  assumptions: z.array(z.string()).default([]),
+  warnings: z.array(z.string()).default([])
+});
+export type ProfitabilitySet = z.infer<typeof profitabilitySetSchema>;
+
 export const stockoutRiskSchema = z.object({
   matId: z.number(),
   matName: z.string(),
@@ -160,10 +215,20 @@ export const actionPlanSchema = z.object({
   id: z.string(),
   title: z.string(),
   priority: z.enum(["low", "medium", "high", "critical"]),
-  category: z.enum(["market", "operations", "logistics", "expansion", "risk"]),
+  category: z.enum(["market", "operations", "logistics", "expansion", "risk", "profitability"]),
   score: z.number().optional(),
   confidence: z.enum(["low", "medium", "high"]).optional(),
+  profitPerHour: z.number().optional(),
+  marginPct: z.number().optional(),
+  profitabilityTag: z.string().optional(),
   whyNow: z.string().optional(),
+  bestWhen: z.string().optional(),
+  avoidIf: z.string().optional(),
+  whatWouldChangeThis: z.string().optional(),
+  horizonId: z.string().optional(),
+  horizonLabel: z.string().optional(),
+  latestUsefulByHours: z.number().optional(),
+  futureTriggers: z.array(z.string()).optional(),
   scoreBreakdown: z.record(z.number()).optional(),
   expectedBenefit: z.string(),
   costSummary: z.string(),
@@ -172,6 +237,64 @@ export const actionPlanSchema = z.object({
   preparedCommands: z.array(preparedCommandSchema).default([])
 });
 export type ActionPlan = z.infer<typeof actionPlanSchema>;
+
+export const decisionBriefAlternativeSchema = z.object({
+  title: z.string(),
+  pros: z.array(z.string()).default([]),
+  cons: z.array(z.string()).default([]),
+  chooseWhen: z.string()
+});
+export type DecisionBriefAlternative = z.infer<typeof decisionBriefAlternativeSchema>;
+
+export const decisionBriefSchema = z.object({
+  thesis: z.string(),
+  recommendedPath: z.array(z.string()).default([]),
+  whyThisPath: z.array(z.string()).default([]),
+  alternatives: z.array(decisionBriefAlternativeSchema).default([]),
+  constraints: z.array(z.string()).default([]),
+  inspectNext: z.array(z.string()).default([]),
+  confidence: z.enum(["low", "medium", "high"])
+});
+export type DecisionBrief = z.infer<typeof decisionBriefSchema>;
+
+export const projectionHorizonSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  hours: z.number()
+});
+export type ProjectionHorizon = z.infer<typeof projectionHorizonSchema>;
+
+export const projectedMaterialNeedSchema = z.object({
+  horizonId: z.string(),
+  horizonLabel: z.string(),
+  hours: z.number(),
+  matId: z.number(),
+  matName: z.string(),
+  requiredQty: z.number(),
+  availableQty: z.number(),
+  netNeedQty: z.number(),
+  tonnes: z.number().optional()
+});
+export type ProjectedMaterialNeed = z.infer<typeof projectedMaterialNeedSchema>;
+
+export const projectionBandSchema = z.object({
+  horizonId: z.string(),
+  summary: z.string(),
+  confidence: z.enum(["low", "medium", "high"]),
+  actionIds: z.array(z.string()).default([]),
+  materialNeeds: z.array(projectedMaterialNeedSchema).default([]),
+  constraints: z.array(z.string()).default([]),
+  inspectNext: z.array(z.string()).default([])
+});
+export type ProjectionBand = z.infer<typeof projectionBandSchema>;
+
+export const projectionSetSchema = z.object({
+  horizons: z.array(projectionHorizonSchema),
+  bands: z.array(projectionBandSchema),
+  materialNeeds: z.array(projectedMaterialNeedSchema),
+  warnings: z.array(z.string()).default([])
+});
+export type ProjectionSet = z.infer<typeof projectionSetSchema>;
 
 export const pressureSummarySchema = z.object({
   status: z.enum(["low", "medium", "high", "critical"]),
@@ -228,7 +351,10 @@ export const sitrepResponseSchema = z.object({
   provider: providerSchema,
   model: z.string(),
   summary: z.string(),
+  decisionBrief: decisionBriefSchema,
+  projections: projectionSetSchema,
   actionPlans: z.array(actionPlanSchema),
+  profitability: profitabilitySetSchema.optional(),
   marketSignals: z.array(marketSignalSchema),
   stockoutRisks: z.array(stockoutRiskSchema),
   expansionCandidates: z.array(expansionCandidateSchema),

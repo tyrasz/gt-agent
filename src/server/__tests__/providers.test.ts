@@ -178,7 +178,19 @@ describe("RestLlmPlanner", () => {
     expect(requestBody.store).toBe(false);
     expect(promptBody).toContain("The player request to answer first");
     expect(promptBody).toContain("Focus on cargo bottlenecks before my next login.");
+    expect(promptBody).toContain("Money values from GT raw fields are integer cents.");
     const compactPayload = JSON.parse(promptBody.slice(promptBody.indexOf("{\"planningContext\"")));
+    expect(compactPayload.snapshotSummary.company.cashCents).toBe(5_000_000);
+    expect(compactPayload.snapshotSummary.company.cashDisplay).toBe("$50,000");
+    expect(compactPayload.snapshotSummary.company.cash).toBeUndefined();
+    expect(compactPayload.deterministicSitrep.situation.cash.currentCents).toBe(5_000_000);
+    expect(compactPayload.deterministicSitrep.situation.cash.currentDisplay).toBe("$50,000");
+    expect(compactPayload.deterministicSitrep.situation.cash.current).toBeUndefined();
+    expect(compactPayload.deterministicSitrep.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
+    expect(compactPayload.deterministicSitrep.projections.bands.length).toBeGreaterThan(0);
+    expect(compactPayload.deterministicSitrep.profitability.companyFit.length).toBeGreaterThan(0);
+    expect(compactPayload.deterministicSitrep.profitability.globalTargets.length).toBeGreaterThan(0);
+    expect(compactPayload.deterministicSitrep.profitability.companyFit[0].profitPerHourDisplay).toContain("/h");
     expect(compactPayload.deterministicSitrep.topActionPlans.length).toBeGreaterThan(0);
     expect(compactPayload.deterministicSitrep.topMarketSignals.length).toBeGreaterThan(0);
     expect(compactPayload.rawSnapshot).toBeUndefined();
@@ -192,7 +204,7 @@ describe("RestLlmPlanner", () => {
           {
             type: "message",
             content: [
-              { type: "output_text", text: JSON.stringify({ summary: "Nested response worked.", actionPlanNarratives: [], warnings: [] }) }
+              { type: "output_text", text: JSON.stringify({ summary: "Nested response worked.", decisionBriefNarrative: {}, actionPlanNarratives: [], warnings: [] }) }
             ]
           }
         ]
@@ -228,6 +240,7 @@ describe("RestLlmPlanner", () => {
                   {
                     text: JSON.stringify({
                       summary: "Gemini draft worked.",
+                      decisionBriefNarrative: {},
                       actionPlanNarratives: [],
                       warnings: [],
                       marketSignals: [{ matId: 1 }],
@@ -272,12 +285,30 @@ describe("RestLlmPlanner", () => {
       fetchImpl: async () => Response.json({
         output_text: JSON.stringify(makeProviderJson({
           summary: "Narrative summary.",
+          decisionBriefNarrative: {
+            thesis: "Narrative thesis.",
+            alternatives: [
+              {
+                title: deterministicSitrep.decisionBrief.alternatives[0]?.title,
+                pros: ["Narrative pro."],
+                cons: ["Narrative con."],
+                chooseWhen: "Narrative choose-when."
+              },
+              {
+                title: "Invented alternative",
+                chooseWhen: "This should be ignored."
+              }
+            ]
+          },
           actionPlanNarratives: [
             {
               id: firstPlan!.id,
               expectedBenefit: "Narrative benefit grounded in the scored plan.",
               risk: "Narrative risk.",
               whyNow: "Narrative why-now.",
+              bestWhen: "Narrative best-when.",
+              avoidIf: "Narrative avoid-if.",
+              whatWouldChangeThis: "Narrative change trigger.",
               evidence: ["Narrative evidence."]
             },
             {
@@ -304,11 +335,19 @@ describe("RestLlmPlanner", () => {
       expectedBenefit: "Narrative benefit grounded in the scored plan.",
       risk: "Narrative risk.",
       whyNow: "Narrative why-now.",
+      bestWhen: "Narrative best-when.",
+      avoidIf: "Narrative avoid-if.",
+      whatWouldChangeThis: "Narrative change trigger.",
       score: firstPlan!.score,
       scoreBreakdown: firstPlan!.scoreBreakdown
     });
     expect(result.actionPlans[0]?.evidence).toContain("Narrative evidence.");
     if (secondPlan) expect(result.actionPlans[1]).toEqual(secondPlan);
     expect(result.actionPlans.some((plan) => plan.id === "invented-action")).toBe(false);
+    expect(result.decisionBrief.thesis).toBe("Narrative thesis.");
+    expect(result.decisionBrief.confidence).toBe(deterministicSitrep.decisionBrief.confidence);
+    expect(result.decisionBrief.alternatives.some((alternative) => alternative.title === "Invented alternative")).toBe(false);
+    expect(result.decisionBrief.alternatives[0]?.pros).toEqual(["Narrative pro."]);
+    expect(result.projections).toEqual(deterministicSitrep.projections);
   });
 });

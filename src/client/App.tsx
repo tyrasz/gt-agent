@@ -21,7 +21,7 @@ import {
 } from "lucide-react";
 import type { ModelCatalogResponse, ModelOption, PressureSummary, Provider, SitrepResponse } from "../shared/schemas.js";
 
-type Tab = "sitrep" | "market" | "operations" | "logistics" | "expansion" | "raw";
+type Tab = "sitrep" | "market" | "profitability" | "operations" | "logistics" | "expansion" | "raw";
 
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
@@ -50,6 +50,7 @@ function isLargeModelId(modelId: string): boolean {
 const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
   { id: "sitrep", label: "Sitrep", icon: ClipboardList },
   { id: "market", label: "Market", icon: BarChart3 },
+  { id: "profitability", label: "Profitability", icon: TrendingUp },
   { id: "operations", label: "Operations", icon: Factory },
   { id: "logistics", label: "Logistics", icon: Ship },
   { id: "expansion", label: "Expansion", icon: Rocket },
@@ -538,6 +539,10 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
     );
   }
 
+  if (tab === "profitability") {
+    return <ProfitabilityPanel sitrep={sitrep} />;
+  }
+
   if (tab === "logistics") {
     return (
       <div className="item-grid">
@@ -596,6 +601,8 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
           </div>
         ) : null}
       </section>
+      {sitrep.decisionBrief ? <DecisionBriefPanel brief={sitrep.decisionBrief} /> : null}
+      {sitrep.projections ? <TimelinePanel sitrep={sitrep} /> : null}
       <div className="action-list">
         {sitrep.actionPlans.map((plan) => (
           <article className="action-card" key={plan.id}>
@@ -605,6 +612,10 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
                 <h3>{plan.title}</h3>
               </div>
               <div className="plan-badges">
+                {plan.horizonLabel ? <span className="horizon-chip">{plan.horizonLabel}</span> : null}
+                {plan.profitPerHour !== undefined ? <span className="profit-chip">{moneyPerHour(plan.profitPerHour)}</span> : null}
+                {plan.marginPct !== undefined ? <span className="profit-chip">{Math.round(plan.marginPct)}% margin</span> : null}
+                {plan.profitabilityTag ? <span className="profit-chip">{plan.profitabilityTag}</span> : null}
                 {plan.score !== undefined ? <span className="score-chip">{Math.round(plan.score)}</span> : null}
                 {plan.confidence ? <span className="confidence-chip">{plan.confidence}</span> : null}
                 <span className={`priority ${plan.priority}`}>{plan.priority}</span>
@@ -616,6 +627,13 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
               <p><strong>Cost:</strong> {plan.costSummary}</p>
               <p><strong>Risk:</strong> {plan.risk}</p>
             </div>
+            {plan.bestWhen || plan.avoidIf || plan.whatWouldChangeThis ? (
+              <div className="action-context">
+                {plan.bestWhen ? <p><strong>Best when:</strong> {plan.bestWhen}</p> : null}
+                {plan.avoidIf ? <p><strong>Avoid if:</strong> {plan.avoidIf}</p> : null}
+                {plan.whatWouldChangeThis ? <p><strong>Changes if:</strong> {plan.whatWouldChangeThis}</p> : null}
+              </div>
+            ) : null}
             <div className="evidence-list">
               {plan.evidence.slice(0, 4).map((item) => <span key={item}>{item}</span>)}
             </div>
@@ -633,6 +651,210 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
         ))}
       </div>
     </div>
+  );
+}
+
+function TimelinePanel({ sitrep }: { sitrep: SitrepResponse }) {
+  const actionTitleById = new globalThis.Map(sitrep.actionPlans.map((plan) => [plan.id, plan.title]));
+  return (
+    <section className="timeline-panel" aria-label="Projection Timeline">
+      <div className="timeline-head">
+        <div>
+          <span className="category">Timeline</span>
+          <h2>Projection roadmap</h2>
+        </div>
+        {sitrep.projections.warnings.length > 0 ? <span className="tag watch">{sitrep.projections.warnings.length} warnings</span> : null}
+      </div>
+      <div className="timeline-grid">
+        {sitrep.projections.bands.map((band) => {
+          const horizon = sitrep.projections.horizons.find((item) => item.id === band.horizonId);
+          return (
+            <article className="timeline-card" key={band.horizonId}>
+              <header>
+                <strong>{horizon?.label ?? band.horizonId}</strong>
+                <span className={`confidence-chip ${band.confidence}`}>{band.confidence}</span>
+              </header>
+              <p>{band.summary}</p>
+              {band.materialNeeds.length > 0 ? (
+                <div className="timeline-section">
+                  <span>Material pressure</span>
+                  <div className="mini-list">
+                    {band.materialNeeds.slice(0, 3).map((need) => (
+                      <span key={`${band.horizonId}-${need.matId}`}>{need.matName}: {Math.ceil(need.netNeedQty).toLocaleString()} net</span>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+              {band.actionIds.length > 0 ? (
+                <div className="timeline-section">
+                  <span>Top moves</span>
+                  <div className="mini-list">
+                    {band.actionIds.map((id) => <span key={id}>{actionTitleById.get(id) ?? id}</span>)}
+                  </div>
+                </div>
+              ) : null}
+              {band.constraints.length > 0 ? (
+                <div className="timeline-section">
+                  <span>Expected bottleneck</span>
+                  <p>{band.constraints[0]}</p>
+                </div>
+              ) : null}
+              <details>
+                <summary>Inspect next</summary>
+                <ul>{band.inspectNext.map((item) => <li key={item}>{item}</li>)}</ul>
+              </details>
+            </article>
+          );
+        })}
+      </div>
+    </section>
+  );
+}
+
+function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
+  const profitability = sitrep.profitability;
+  if (!profitability) {
+    return (
+      <div className="empty-state compact">
+        <TrendingUp size={28} />
+        <h2>No profitability data in this sitrep</h2>
+      </div>
+    );
+  }
+
+  return (
+    <div className="profitability-stack">
+      <section className="profitability-summary">
+        <div>
+          <span className="category">Profitability</span>
+          <h2>Company-fit profit moves first, global targets second</h2>
+        </div>
+        <div className="profitability-notes">
+          {profitability.assumptions.slice(0, 3).map((item) => <span key={item}>{item}</span>)}
+          {profitability.warnings.slice(0, 2).map((item) => <span className="warning-text" key={item}>{item}</span>)}
+        </div>
+      </section>
+      <ProfitabilityOpportunityGrid title="Company-fit now" opportunities={profitability.companyFit} />
+      <ProfitabilityOpportunityGrid title="Global targets to restructure toward" opportunities={profitability.globalTargets} />
+      <section className="profitability-table-card">
+        <header>
+          <h3>Top recipe economics</h3>
+          <span>{profitability.recipes.length} ranked recipes</span>
+        </header>
+        <div className="profitability-table" role="table" aria-label="Top recipe economics">
+          <div role="row" className="profitability-row heading">
+            <span>Recipe</span>
+            <span>Building</span>
+            <span>Profit / h</span>
+            <span>Margin</span>
+            <span>Input cost / h</span>
+            <span>Coverage</span>
+            <span>Fit</span>
+          </div>
+          {profitability.recipes.slice(0, 12).map((recipe) => (
+            <div role="row" className="profitability-row" key={recipe.recipeId}>
+              <span>
+                <strong>{recipe.outputMatName}</strong>
+                <small>{recipe.recipeName}</small>
+              </span>
+              <span>{recipe.buildingName ?? "Unknown"}</span>
+              <span>{moneyPerHour(recipe.netEstimatePerHour)}</span>
+              <span>{recipe.marginPct !== undefined ? `${Math.round(recipe.marginPct)}%` : "n/a"}</span>
+              <span>{moneyPerHour(recipe.inputCostPerHour)}</span>
+              <span>{Math.round(recipe.inputCoveragePct)}%</span>
+              <span><span className={`confidence-chip ${recipe.priceConfidence}`}>{recipe.companyFit}</span></span>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function ProfitabilityOpportunityGrid({ title, opportunities }: { title: string; opportunities: NonNullable<SitrepResponse["profitability"]>["companyFit"] }) {
+  return (
+    <section className="profitability-section">
+      <header>
+        <h3>{title}</h3>
+        <span>{opportunities.length} options</span>
+      </header>
+      <div className="item-grid">
+        {opportunities.length === 0 ? (
+          <article className="data-card wide">
+            <strong>No option cleared the filters</strong>
+            <p>Use the raw snapshot or a fresh run after production/market state changes.</p>
+          </article>
+        ) : opportunities.map((opportunity) => (
+          <article className="data-card wide" key={opportunity.id}>
+            <header>
+              <div>
+                <span className="category">{opportunity.kind.replaceAll("_", " ")}</span>
+                <strong>{opportunity.title}</strong>
+              </div>
+              <div className="plan-badges">
+                <span className="horizon-chip">{opportunity.horizonLabel}</span>
+                <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
+              </div>
+            </header>
+            <p>{opportunity.recommendation}</p>
+            <dl>
+              <div><dt>Score</dt><dd>{Math.round(opportunity.score)}</dd></div>
+              <div><dt>Margin</dt><dd>{opportunity.marginPct !== undefined ? `${Math.round(opportunity.marginPct)}%` : "n/a"}</dd></div>
+              <div><dt>Recipe</dt><dd>{opportunity.recipeId}</dd></div>
+            </dl>
+            <div className="evidence-list">
+              {[...opportunity.rationale, ...opportunity.blockers].slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+            </div>
+          </article>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function DecisionBriefPanel({ brief }: { brief: SitrepResponse["decisionBrief"] }) {
+  return (
+    <section className="decision-brief" aria-label="Decision Brief">
+      <div className="decision-brief-head">
+        <div>
+          <span className="category">Decision brief</span>
+          <h2>{brief.thesis}</h2>
+        </div>
+        <span className={`confidence-chip ${brief.confidence}`}>{brief.confidence}</span>
+      </div>
+      <div className="decision-grid">
+        <article>
+          <h3>Recommended path</h3>
+          <ol>{brief.recommendedPath.map((item) => <li key={item}>{item}</li>)}</ol>
+        </article>
+        <article>
+          <h3>Why this path</h3>
+          <ul>{brief.whyThisPath.slice(0, 4).map((item) => <li key={item}>{item}</li>)}</ul>
+        </article>
+        <details>
+          <summary>Alternatives</summary>
+          <div className="brief-detail-list">
+            {brief.alternatives.map((alternative) => (
+              <section key={alternative.title}>
+                <h4>{alternative.title}</h4>
+                <p><strong>Choose when:</strong> {alternative.chooseWhen}</p>
+                {alternative.pros.length > 0 ? <p><strong>Pros:</strong> {alternative.pros.join(" ")}</p> : null}
+                {alternative.cons.length > 0 ? <p><strong>Cons:</strong> {alternative.cons.join(" ")}</p> : null}
+              </section>
+            ))}
+          </div>
+        </details>
+        <details>
+          <summary>Constraints</summary>
+          <ul>{brief.constraints.map((item) => <li key={item}>{item}</li>)}</ul>
+        </details>
+        <details>
+          <summary>Inspect next</summary>
+          <ul>{brief.inspectNext.map((item) => <li key={item}>{item}</li>)}</ul>
+        </details>
+      </div>
+    </section>
   );
 }
 
@@ -662,4 +884,8 @@ function SituationGrid({ situation }: { situation: NonNullable<SitrepResponse["s
 function money(cents: number) {
   if (cents < 0) return "n/a";
   return `$${(cents / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function moneyPerHour(cents: number) {
+  return `${money(cents)}/h`;
 }
