@@ -35,6 +35,17 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
             title: "Restock Iron Ore",
             priority: "high",
             category: "operations",
+            score: 84,
+            confidence: "high",
+            whyNow: "Iron Ore coverage is inside the 12-hour planning window.",
+            scoreBreakdown: {
+              urgency: 90,
+              companyFit: 100,
+              profitPotential: 10,
+              marketConfidence: 65,
+              feasibility: 88,
+              goalAlignment: 85
+            },
             expectedBenefit: "Keeps production running.",
             costSummary: "100 units.",
             risk: "Price can move.",
@@ -55,6 +66,14 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
         expansionCandidates: [],
         logisticsMoves: [],
         warnings: [],
+        situation: {
+          cash: { status: "low", score: 15, summary: "$50,000 cash available.", current: 5000000 },
+          production: { status: "high", score: 72, summary: "1 material risk, 0 critical." },
+          logistics: { status: "medium", score: 45, summary: "1 feasible transfer." },
+          market: { status: "medium", score: 52, summary: "1 actionable market signal." },
+          expansion: { status: "low", score: 20, summary: "No structural expansion pressure." },
+          dataQuality: { status: "low", score: 5, summary: "No snapshot warnings.", warnings: [] }
+        },
         rawSnapshot: { company: { name: "Test Co" } }
       }
     });
@@ -71,6 +90,9 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByText("Restock Iron Ore")).toBeVisible();
   await expect(page.getByText("Restock inputs and review exchange pricing.")).toBeVisible();
+  await expect(page.getByText("1 material risk, 0 critical.")).toBeVisible();
+  await expect(page.getByText("Why this is ranked:")).toBeVisible();
+  await expect(page.getByText("84")).toBeVisible();
 });
 
 test("full OpenAI model remains selectable", async ({ page }) => {
@@ -117,10 +139,76 @@ test("full OpenAI model remains selectable", async ({ page }) => {
 
   await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5-mini");
   await expect(page.getByText("Fast OpenAI models are selected by default.")).toBeVisible();
-  await page.getByLabel("Model").selectOption("gpt-5.5");
+  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5.5");
+  await expect(page.getByText("Large model selected. This can wait up to 12 minutes.")).toBeVisible();
   await page.getByLabel("Command prompt").fill("Use the full model for this plan.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByText("Full model was selected explicitly.")).toBeVisible();
+});
+
+test("LLM timeout error remains visible without clearing the dashboard", async ({ page }) => {
+  let sitrepCalls = 0;
+  await page.route("**/api/session/keys", async (route) => {
+    await route.fulfill({ json: { ok: true } });
+  });
+  await page.route("**/api/session/models?provider=openai&refresh=false", async (route) => {
+    await route.fulfill({
+      json: {
+        provider: "openai",
+        defaultModel: "gpt-5.5-mini",
+        models: [
+          { id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" },
+          { id: "gpt-5.5", label: "gpt-5.5", source: "provider" }
+        ],
+        warnings: []
+      }
+    });
+  });
+  await page.route("**/api/agent/sitrep", async (route) => {
+    sitrepCalls += 1;
+    if (sitrepCalls === 1) {
+      await route.fulfill({
+        json: {
+          generatedAt: new Date().toISOString(),
+          provider: "openai",
+          model: "gpt-5.5-mini",
+          summary: "Fast model generated the current dashboard.",
+          actionPlans: [],
+          marketSignals: [],
+          stockoutRisks: [],
+          expansionCandidates: [],
+          logisticsMoves: [],
+          warnings: [],
+          rawSnapshot: { fetchedAt: new Date().toISOString(), company: { name: "Test Co" } }
+        }
+      });
+      return;
+    }
+
+    await route.fulfill({
+      status: 504,
+      json: {
+        error: "OpenAI did not respond within 12m. Try a faster model or another provider.",
+        details: { provider: "openai", model: "gpt-5.5", timeoutMs: 720000, timeout: "12m" }
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByLabel("Galactic Tycoons API key").fill("gt-test-key");
+  await page.getByLabel("OpenAI API key").fill("sk-test-key");
+  await page.getByRole("button", { name: "Start Session" }).click();
+
+  await page.getByLabel("Command prompt").fill("Generate a fast model dashboard first.");
+  await page.getByRole("button", { name: "Generate Sitrep" }).click();
+  await expect(page.getByText("Fast model generated the current dashboard.")).toBeVisible();
+
+  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5.5");
+  await expect(page.getByText("Large model selected. This can wait up to 12 minutes.")).toBeVisible();
+  await page.getByLabel("Command prompt").fill("Try the large model.");
+  await page.getByRole("button", { name: "Generate Sitrep" }).click();
+  await expect(page.getByText("OpenAI did not respond within 12m. Try a faster model or another provider.")).toBeVisible();
+  await expect(page.getByText("Fast model generated the current dashboard.")).toBeVisible();
 });
 
 test("model catalog failure keeps fallback models available", async ({ page }) => {

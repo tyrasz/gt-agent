@@ -1,4 +1,4 @@
-import type { GameSnapshot, SitrepResponse } from "../../shared/schemas.js";
+import type { GameSnapshot } from "../../shared/schemas.js";
 
 export function makeSnapshot(): GameSnapshot {
   return {
@@ -93,17 +93,10 @@ export function makeSnapshot(): GameSnapshot {
   };
 }
 
-export function makeProviderJson(overrides: Partial<SitrepResponse> = {}) {
+export function makeProviderJson(overrides: Record<string, unknown> = {}) {
   return {
-    generatedAt: "2026-05-16T12:01:00.000Z",
-    provider: "openai",
-    model: "test-model",
     summary: "Prioritize restocking and market repricing.",
-    actionPlans: [],
-    marketSignals: [],
-    stockoutRisks: [],
-    expansionCandidates: [],
-    logisticsMoves: [],
+    actionPlanNarratives: [],
     warnings: [],
     ...overrides
   };

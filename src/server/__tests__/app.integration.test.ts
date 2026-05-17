@@ -145,7 +145,12 @@ describe("API integration", () => {
         fetchImpl: async () => Response.json({
           output_text: JSON.stringify({
             summary: "LLM summary focused on restocking.",
-            actionPlans: [],
+            actionPlanNarratives: [
+              {
+                id: "restock-1",
+                expectedBenefit: "LLM wording keeps the most urgent input covered."
+              }
+            ],
             warnings: ["Provider caveat."]
           })
         })
@@ -178,12 +183,18 @@ describe("API integration", () => {
     expect(body.diagnostics.source).toBe("llm");
     expect(body.summary).toBe("LLM summary focused on restocking.");
     expect(body.actionPlans).toHaveLength(deterministic.actionPlans.length);
+    expect(body.actionPlans[0].score).toBeTypeOf("number");
+    expect(body.actionPlans[0].scoreBreakdown).toBeTruthy();
+    expect(body.actionPlans.map((plan: { id: string }) => plan.id)).toEqual(deterministic.actionPlans.map((plan) => plan.id));
     expect(body.marketSignals).toHaveLength(deterministic.marketSignals.length);
+    expect(body.marketSignals[0]).toHaveProperty("ownedQty");
+    expect(body.marketSignals[0]).toHaveProperty("liquidityScore");
     expect(body.expansionCandidates).toHaveLength(deterministic.expansionCandidates.length);
+    expect(body.situation).toBeTruthy();
     expect(body.warnings).toContain("Provider caveat.");
   });
 
-  it("returns deterministic output when provider draft validation fails", async () => {
+  it("returns a provider error when provider draft validation fails", async () => {
     const snapshot = makeSnapshot();
     app = await createApp({
       sessionStore: new SessionStore(),
@@ -191,7 +202,7 @@ describe("API integration", () => {
         getSnapshot: async () => snapshot
       } as any,
       llmPlanner: new RestLlmPlanner({
-        fetchImpl: async () => Response.json({ output_text: JSON.stringify({ actionPlans: [], warnings: [] }) })
+        fetchImpl: async () => Response.json({ output_text: JSON.stringify({ actionPlanNarratives: [], warnings: [] }) })
       })
     });
 
@@ -216,13 +227,15 @@ describe("API integration", () => {
     });
 
     const body = sitrep.json();
-    expect(sitrep.statusCode).toBe(200);
-    expect(body.diagnostics.source).toBe("deterministic");
-    expect(body.warnings.join(" ")).toContain("LLM provider unavailable or invalid");
-    expect(body.marketSignals.length).toBeGreaterThan(0);
+    expect(sitrep.statusCode).toBe(502);
+    expect(body.error).toContain("Provider returned JSON that did not match the LLM draft schema.");
+    expect(body.error).toContain("Try another model or provider.");
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5" });
+    expect(body.diagnostics).toBeUndefined();
+    expect(body.marketSignals).toBeUndefined();
   });
 
-  it("returns deterministic output with an actionable OpenAI timeout warning", async () => {
+  it("returns a 504 when a slow large OpenAI model exceeds its configured timeout", async () => {
     const snapshot = makeSnapshot();
     app = await createApp({
       sessionStore: new SessionStore(),
@@ -230,7 +243,8 @@ describe("API integration", () => {
         getSnapshot: async () => snapshot
       } as any,
       llmPlanner: new RestLlmPlanner({
-        timeoutMsByProvider: { openai: 5 },
+        timeoutMsByProvider: { openai: 1000 },
+        largeTimeoutMsByProvider: { openai: 5 },
         fetchImpl: async (_input, init) =>
           new Promise<Response>((_resolve, reject) => {
             init?.signal?.addEventListener("abort", () => {
@@ -261,9 +275,54 @@ describe("API integration", () => {
     });
 
     const body = sitrep.json();
-    expect(sitrep.statusCode).toBe(200);
-    expect(body.diagnostics.source).toBe("deterministic");
-    expect(body.warnings.join(" ")).toContain("OpenAI did not respond within 5ms; showing deterministic sitrep. Try a faster model or increase timeout.");
-    expect(body.warnings.join(" ")).not.toContain("LLM provider unavailable or invalid");
+    expect(sitrep.statusCode).toBe(504);
+    expect(body.error).toContain("OpenAI did not respond within 5ms. Try a faster model or another provider.");
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5", timeoutMs: 5, timeout: "5ms" });
+    expect(body.diagnostics).toBeUndefined();
+  });
+
+  it("uses the fast OpenAI timeout for mini models", async () => {
+    const snapshot = makeSnapshot();
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async () => snapshot
+      } as any,
+      llmPlanner: new RestLlmPlanner({
+        timeoutMsByProvider: { openai: 5 },
+        largeTimeoutMsByProvider: { openai: 1000 },
+        fetchImpl: async (_input, init) =>
+          new Promise<Response>((_resolve, reject) => {
+            init?.signal?.addEventListener("abort", () => {
+              reject(new DOMException("Aborted", "AbortError"));
+            });
+          })
+      })
+    });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const sitrep = await app.inject({
+      method: "POST",
+      url: "/api/agent/sitrep",
+      headers: { cookie: String(keys.headers["set-cookie"]) },
+      payload: {
+        provider: "openai",
+        model: "gpt-5.5-mini",
+        planningContext: context
+      }
+    });
+
+    const body = sitrep.json();
+    expect(sitrep.statusCode).toBe(504);
+    expect(body.error).toContain("OpenAI did not respond within 5ms. Try a faster model or another provider.");
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5-mini", timeoutMs: 5, timeout: "5ms" });
   });
 });

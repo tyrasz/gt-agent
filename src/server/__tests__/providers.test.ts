@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { buildDeterministicSitrep } from "../analysis.js";
-import { RestLlmPlanner } from "../llm/providers.js";
+import { isLargeModel, resolveProviderTimeoutMs, RestLlmPlanner } from "../llm/providers.js";
 import { makeProviderJson, makeSnapshot } from "./fixtures.js";
 
 const context = {
@@ -15,6 +15,29 @@ describe("RestLlmPlanner", () => {
     delete process.env.ANTHROPIC_TIMEOUT_MS;
     delete process.env.GEMINI_TIMEOUT_MS;
     delete process.env.LLM_TIMEOUT_MS;
+    delete process.env.OPENAI_LARGE_MODEL_TIMEOUT_MS;
+    delete process.env.ANTHROPIC_LARGE_MODEL_TIMEOUT_MS;
+    delete process.env.GEMINI_LARGE_MODEL_TIMEOUT_MS;
+    delete process.env.LLM_LARGE_MODEL_TIMEOUT_MS;
+  });
+
+  it("resolves large and fast model timeout tiers", () => {
+    const fastTimeouts = { openai: 60_000, anthropic: 30_000, gemini: 30_000 };
+    const largeTimeouts = { openai: 720_000, anthropic: 720_000, gemini: 720_000 };
+
+    expect(isLargeModel("openai", "gpt-5.5")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5.5-pro")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5.4")).toBe(true);
+    expect(isLargeModel("anthropic", "claude-opus-4-7")).toBe(true);
+    expect(isLargeModel("anthropic", "claude-sonnet-4-6")).toBe(true);
+    expect(isLargeModel("gemini", "gemini-2.5-pro")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5.5-mini")).toBe(false);
+    expect(isLargeModel("openai", "gpt-4.1-mini")).toBe(false);
+    expect(isLargeModel("gemini", "gemini-2.5-flash")).toBe(false);
+    expect(isLargeModel("anthropic", "claude-haiku-4-5")).toBe(false);
+
+    expect(resolveProviderTimeoutMs("openai", "gpt-5.5", fastTimeouts, largeTimeouts)).toBe(720_000);
+    expect(resolveProviderTimeoutMs("openai", "gpt-5.5-mini", fastTimeouts, largeTimeouts)).toBe(60_000);
   });
 
   it("retries once when provider JSON fails schema validation", async () => {
@@ -23,7 +46,7 @@ describe("RestLlmPlanner", () => {
       fetchImpl: async () => {
         calls += 1;
         if (calls === 1) {
-          return Response.json({ output_text: JSON.stringify({ actionPlans: [], warnings: [] }) });
+          return Response.json({ output_text: JSON.stringify({ actionPlanNarratives: [], warnings: [] }) });
         }
         return Response.json({ output_text: JSON.stringify(makeProviderJson()) });
       }
@@ -62,12 +85,62 @@ describe("RestLlmPlanner", () => {
 
     await expect(planner.generateStructuredPlan({
       provider: "openai",
-      model: "test-model",
+      model: "gpt-5.5-mini",
       providerApiKey: "sk-test",
       planningContext: context,
       snapshot,
       deterministicSitrep
     })).rejects.toThrow("OpenAI did not respond within 5ms");
+  });
+
+  it("uses the OpenAI-specific large timeout for large OpenAI models", async () => {
+    process.env.OPENAI_TIMEOUT_MS = "1000";
+    process.env.OPENAI_LARGE_MODEL_TIMEOUT_MS = "5";
+    const planner = new RestLlmPlanner({
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        })
+    });
+
+    const snapshot = makeSnapshot();
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5.5");
+
+    await expect(planner.generateStructuredPlan({
+      provider: "openai",
+      model: "gpt-5.5",
+      providerApiKey: "sk-test",
+      planningContext: context,
+      snapshot,
+      deterministicSitrep
+    })).rejects.toThrow("OpenAI did not respond within 5ms. Try a faster model or another provider.");
+  });
+
+  it("lets provider-specific large timeout env vars override the global large timeout", async () => {
+    process.env.LLM_LARGE_MODEL_TIMEOUT_MS = "1000";
+    process.env.GEMINI_LARGE_MODEL_TIMEOUT_MS = "5";
+    const planner = new RestLlmPlanner({
+      fetchImpl: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("Aborted", "AbortError"));
+          });
+        })
+    });
+
+    const snapshot = makeSnapshot();
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "gemini", "gemini-2.5-pro");
+
+    await expect(planner.generateStructuredPlan({
+      provider: "gemini",
+      model: "gemini-2.5-pro",
+      providerApiKey: "gk-test",
+      planningContext: context,
+      snapshot,
+      deterministicSitrep
+    })).rejects.toThrow("Gemini did not respond within 5ms. Try a faster model or another provider.");
   });
 
   it("sends the player prompt inside the OpenAI planning request", async () => {
@@ -119,7 +192,7 @@ describe("RestLlmPlanner", () => {
           {
             type: "message",
             content: [
-              { type: "output_text", text: JSON.stringify({ summary: "Nested response worked.", actionPlans: [], warnings: [] }) }
+              { type: "output_text", text: JSON.stringify({ summary: "Nested response worked.", actionPlanNarratives: [], warnings: [] }) }
             ]
           }
         ]
@@ -155,7 +228,7 @@ describe("RestLlmPlanner", () => {
                   {
                     text: JSON.stringify({
                       summary: "Gemini draft worked.",
-                      actionPlans: [],
+                      actionPlanNarratives: [],
                       warnings: [],
                       marketSignals: [{ matId: 1 }],
                       expansionCandidates: [{ title: "Malformed expansion" }]
@@ -182,9 +255,60 @@ describe("RestLlmPlanner", () => {
     });
 
     expect(requestBody.generationConfig.responseMimeType).toBe("application/json");
-    expect(requestBody.generationConfig.responseJsonSchema.properties.summary.type).toBe("string");
+    expect(requestBody.generationConfig.responseSchema.properties.summary.type).toBe("string");
     expect(result.summary).toBe("Gemini draft worked.");
     expect(result.marketSignals).toEqual(deterministicSitrep.marketSignals);
     expect(result.expansionCandidates).toEqual(deterministicSitrep.expansionCandidates);
+  });
+
+  it("merges only narratives for existing deterministic action ids", async () => {
+    const snapshot = makeSnapshot();
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const firstPlan = deterministicSitrep.actionPlans[0];
+    const secondPlan = deterministicSitrep.actionPlans[1];
+    expect(firstPlan).toBeDefined();
+
+    const planner = new RestLlmPlanner({
+      fetchImpl: async () => Response.json({
+        output_text: JSON.stringify(makeProviderJson({
+          summary: "Narrative summary.",
+          actionPlanNarratives: [
+            {
+              id: firstPlan!.id,
+              expectedBenefit: "Narrative benefit grounded in the scored plan.",
+              risk: "Narrative risk.",
+              whyNow: "Narrative why-now.",
+              evidence: ["Narrative evidence."]
+            },
+            {
+              id: "invented-action",
+              expectedBenefit: "This should be ignored."
+            }
+          ]
+        }))
+      })
+    });
+
+    const result = await planner.generateStructuredPlan({
+      provider: "openai",
+      model: "test-model",
+      providerApiKey: "sk-test",
+      planningContext: context,
+      snapshot,
+      deterministicSitrep
+    });
+
+    expect(result.actionPlans.map((plan) => plan.id)).toEqual(deterministicSitrep.actionPlans.map((plan) => plan.id));
+    expect(result.actionPlans[0]).toMatchObject({
+      id: firstPlan!.id,
+      expectedBenefit: "Narrative benefit grounded in the scored plan.",
+      risk: "Narrative risk.",
+      whyNow: "Narrative why-now.",
+      score: firstPlan!.score,
+      scoreBreakdown: firstPlan!.scoreBreakdown
+    });
+    expect(result.actionPlans[0]?.evidence).toContain("Narrative evidence.");
+    if (secondPlan) expect(result.actionPlans[1]).toEqual(secondPlan);
+    expect(result.actionPlans.some((plan) => plan.id === "invented-action")).toBe(false);
   });
 });

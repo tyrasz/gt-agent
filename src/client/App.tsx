@@ -19,7 +19,7 @@ import {
   Ship,
   TrendingUp
 } from "lucide-react";
-import type { ModelCatalogResponse, ModelOption, Provider, SitrepResponse } from "../shared/schemas.js";
+import type { ModelCatalogResponse, ModelOption, PressureSummary, Provider, SitrepResponse } from "../shared/schemas.js";
 
 type Tab = "sitrep" | "market" | "operations" | "logistics" | "expansion" | "raw";
 
@@ -40,6 +40,12 @@ const fallbackModelOptions: Record<Provider, ModelOption[]> = {
   anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"].map((id) => ({ id, label: id, source: "fallback" })),
   gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"].map((id) => ({ id, label: id, source: "fallback" }))
 };
+
+function isLargeModelId(modelId: string): boolean {
+  const lower = modelId.trim().toLowerCase();
+  if (!lower) return false;
+  return !/(^|[-_.])(flash-lite|flash|mini|nano|haiku)($|[-_.])/.test(lower);
+}
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
   { id: "sitrep", label: "Sitrep", icon: ClipboardList },
@@ -84,6 +90,12 @@ export default function App() {
 
   const visibleModelOptions = modelCatalog?.models.length ? modelCatalog.models : fallbackModelOptions[provider];
   const selectedModel = modelMode === "custom" ? customModel.trim() : model;
+  const selectedModelIsLarge = isLargeModelId(selectedModel);
+  const modelTimeoutCopy = selectedModelIsLarge
+    ? "Large model selected. This can wait up to 12 minutes."
+    : provider === "openai"
+      ? "Fast OpenAI models are selected by default. Full models like gpt-5.5 may take longer."
+      : "Fast model selected. Larger models may take longer.";
 
   useEffect(() => {
     if (hasSession) {
@@ -366,7 +378,7 @@ export default function App() {
                 <input value={customModel} onChange={(event) => setCustomModel(event.target.value)} required />
               </label>
             ) : null}
-            {provider === "openai" ? <p className="helper-line">Fast OpenAI models are selected by default. Full models like gpt-5.5 may take longer.</p> : null}
+            <p className={selectedModelIsLarge ? "helper-line timeout-line" : "helper-line"}>{modelTimeoutCopy}</p>
             <details className="advanced-context">
               <summary><Settings2 size={16} /> Planning controls</summary>
               <div className="context-grid">
@@ -495,7 +507,8 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
             <dl>
               <div><dt>Current</dt><dd>{money(signal.currentPrice)}</dd></div>
               <div><dt>Spread</dt><dd>{signal.spreadPct}%</dd></div>
-              <div><dt>Trend</dt><dd>{signal.trend}</dd></div>
+              <div><dt>Need</dt><dd>{Math.ceil(signal.netNeedQty ?? 0).toLocaleString()}</dd></div>
+              <div><dt>Liquidity</dt><dd>{Math.round(signal.liquidityScore ?? 0)}</dd></div>
             </dl>
             <p>{signal.rationale[0]}</p>
           </article>
@@ -573,6 +586,7 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
             <span>{sitrep.warnings.join(" ")}</span>
           </div>
         ) : null}
+        {sitrep.situation ? <SituationGrid situation={sitrep.situation} /> : null}
         {sitrep.diagnostics ? (
           <div className="diagnostic-row">
             <span>Pipeline: {sitrep.diagnostics.source}</span>
@@ -590,9 +604,14 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
                 <span className="category">{plan.category}</span>
                 <h3>{plan.title}</h3>
               </div>
-              <span className={`priority ${plan.priority}`}>{plan.priority}</span>
+              <div className="plan-badges">
+                {plan.score !== undefined ? <span className="score-chip">{Math.round(plan.score)}</span> : null}
+                {plan.confidence ? <span className="confidence-chip">{plan.confidence}</span> : null}
+                <span className={`priority ${plan.priority}`}>{plan.priority}</span>
+              </div>
             </header>
             <div className="action-copy">
+              {plan.whyNow ? <p><strong>Why this is ranked:</strong> {plan.whyNow}</p> : null}
               <p><strong>Benefit:</strong> {plan.expectedBenefit}</p>
               <p><strong>Cost:</strong> {plan.costSummary}</p>
               <p><strong>Risk:</strong> {plan.risk}</p>
@@ -613,6 +632,29 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
           </article>
         ))}
       </div>
+    </div>
+  );
+}
+
+function SituationGrid({ situation }: { situation: NonNullable<SitrepResponse["situation"]> }) {
+  const rows: Array<[string, PressureSummary]> = [
+    ["Cash", situation.cash],
+    ["Production", situation.production],
+    ["Logistics", situation.logistics],
+    ["Market", situation.market],
+    ["Expansion", situation.expansion],
+    ["Data", situation.dataQuality]
+  ];
+
+  return (
+    <div className="situation-grid">
+      {rows.map(([label, item]) => (
+        <div key={label}>
+          <span>{label}</span>
+          <strong className={`pressure ${item.status}`}>{item.status}</strong>
+          <p>{item.summary}</p>
+        </div>
+      ))}
     </div>
   );
 }

@@ -301,6 +301,10 @@ textarea {
   margin-top: -6px;
 }
 
+.timeout-line {
+  color: #8a5a0b;
+}
+
 .brief-panel {
   align-content: start;
   display: grid;
@@ -438,6 +442,55 @@ textarea {
   padding: 6px 9px;
 }
 
+.situation-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+}
+
+.situation-grid div {
+  background: #f8faf8;
+  border: 1px solid #dce6df;
+  border-radius: 8px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 10px;
+}
+
+.situation-grid span {
+  color: #687871;
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.situation-grid p {
+  color: #46534e;
+  font-size: 0.82rem;
+  line-height: 1.35;
+}
+
+.pressure {
+  font-size: 0.92rem;
+  text-transform: capitalize;
+}
+
+.pressure.low {
+  color: #146344;
+}
+
+.pressure.medium {
+  color: #22527c;
+}
+
+.pressure.high {
+  color: #815310;
+}
+
+.pressure.critical {
+  color: #9e1c25;
+}
+
 .action-card,
 .data-card {
   border: 1px solid #dce3df;
@@ -458,6 +511,34 @@ textarea {
 .action-card h3 {
   font-size: 1.02rem;
   margin-top: 3px;
+}
+
+.plan-badges {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  justify-content: flex-end;
+}
+
+.score-chip,
+.confidence-chip {
+  border-radius: 999px;
+  font-size: 0.75rem;
+  padding: 5px 8px;
+  white-space: nowrap;
+}
+
+.score-chip {
+  background: #e0f2ea;
+  color: #115a42;
+  font-weight: 800;
+}
+
+.confidence-chip {
+  background: #eef2ef;
+  color: #415049;
+  text-transform: capitalize;
 }
 
 .priority,

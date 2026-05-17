@@ -5,7 +5,7 @@ import staticPlugin from "@fastify/static";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GalacticTycoonsClient, GtApiError, RateLimitError } from "./gtClient.js";
-import { RestLlmPlanner } from "./llm/providers.js";
+import { formatTimeout, LlmProviderError, LlmProviderTimeoutError, RestLlmPlanner } from "./llm/providers.js";
 import { ModelCatalogService } from "./modelCatalog.js";
 import { redactError, redactSecrets } from "./redact.js";
 import { MissingProviderKeyError, SessionStore } from "./sessionStore.js";
@@ -99,6 +99,35 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
     try {
       return await sitrepService.generate(session, parsed.data);
     } catch (error) {
+      if (error instanceof MissingProviderKeyError) {
+        return reply.code(400).send({
+          error: `No ${parsed.data.provider} API key is stored in this session. Start a new session with that provider key to use the model.`,
+          details: { provider: parsed.data.provider, model: parsed.data.model }
+        });
+      }
+      if (error instanceof LlmProviderTimeoutError) {
+        return reply.code(504).send({
+          error: error.message,
+          details: {
+            provider: error.provider,
+            model: error.model ?? parsed.data.model,
+            timeoutMs: error.timeoutMs,
+            timeout: formatTimeout(error.timeoutMs)
+          }
+        });
+      }
+      if (error instanceof LlmProviderError) {
+        const statusCode = error.status === 401 || error.status === 403 ? 400 : 502;
+        const suffix = error.message.includes("Try another model or provider.") ? "" : " Try another model or provider.";
+        return reply.code(statusCode).send({
+          error: `${error.message}${suffix}`,
+          details: {
+            provider: error.provider,
+            model: error.model ?? parsed.data.model,
+            status: error.status
+          }
+        });
+      }
       if (error instanceof RateLimitError) {
         return reply.code(429).send({
           error: error.message,

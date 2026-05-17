@@ -1,8 +1,7 @@
 import { buildDeterministicSitrep } from "./analysis.js";
 import type { GalacticTycoonsClient } from "./gtClient.js";
 import type { LlmPlanner } from "./llm/providers.js";
-import { LlmProviderError, LlmProviderTimeoutError } from "./llm/providers.js";
-import { MissingProviderKeyError, type AgentSession, type SessionStore } from "./sessionStore.js";
+import type { AgentSession, SessionStore } from "./sessionStore.js";
 import type { RefreshOptions, SitrepRequest, SitrepResponse } from "../shared/schemas.js";
 
 const DEFAULT_SITREP_REFRESH: RefreshOptions = {
@@ -29,53 +28,27 @@ export class SitrepService {
     const deterministicMs = Date.now() - totalStartedAt - snapshotMs;
     const llmStartedAt = Date.now();
 
-    try {
-      const providerApiKey = this.sessions.requireProviderKey(session, request.provider);
-      const response = await this.llmPlanner.generateStructuredPlan({
-        provider: request.provider,
-        model: request.model,
-        providerApiKey,
-        planningContext: request.planningContext,
-        snapshot,
-        deterministicSitrep: deterministic
-      });
+    const providerApiKey = this.sessions.requireProviderKey(session, request.provider);
+    const response = await this.llmPlanner.generateStructuredPlan({
+      provider: request.provider,
+      model: request.model,
+      providerApiKey,
+      planningContext: request.planningContext,
+      snapshot,
+      deterministicSitrep: deterministic
+    });
 
-      return {
-        ...response,
-        diagnostics: {
-          source: "llm",
-          timingsMs: {
-            snapshot: snapshotMs,
-            deterministic: deterministicMs,
-            llm: Date.now() - llmStartedAt,
-            total: Date.now() - totalStartedAt
-          }
+    return {
+      ...response,
+      diagnostics: {
+        source: "llm",
+        timingsMs: {
+          snapshot: snapshotMs,
+          deterministic: deterministicMs,
+          llm: Date.now() - llmStartedAt,
+          total: Date.now() - totalStartedAt
         }
-      };
-    } catch (error) {
-      if (error instanceof LlmProviderError || error instanceof MissingProviderKeyError) {
-        const llmMessage = error instanceof MissingProviderKeyError
-          ? `No ${request.provider} API key is stored in this session. Start a new session with that provider key to use the model.`
-          : error.message;
-        const warning = error instanceof LlmProviderTimeoutError
-          ? llmMessage
-          : `LLM provider unavailable or invalid; showing deterministic sitrep. ${llmMessage}`;
-        return {
-          ...deterministic,
-          diagnostics: {
-            source: "deterministic",
-            timingsMs: {
-              snapshot: snapshotMs,
-              deterministic: deterministicMs,
-              llm: Date.now() - llmStartedAt,
-              total: Date.now() - totalStartedAt
-            },
-            llmMessage
-          },
-          warnings: [...deterministic.warnings, warning]
-        };
       }
-      throw error;
-    }
+    };
   }
 }

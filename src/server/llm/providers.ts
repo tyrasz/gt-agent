@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { actionPlanSchema, type Provider, type SitrepResponse } from "../../shared/schemas.js";
+import { type Provider, type SitrepResponse } from "../../shared/schemas.js";
 import type { GameSnapshot, PlayerPlanningContext } from "../../shared/schemas.js";
 
 export type StructuredPlanInput = {
@@ -19,10 +19,13 @@ export type LlmPlannerOptions = {
   fetchImpl?: typeof fetch;
   timeoutMs?: number;
   timeoutMsByProvider?: Partial<Record<Provider, number>>;
+  largeTimeoutMs?: number;
+  largeTimeoutMsByProvider?: Partial<Record<Provider, number>>;
 };
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
 const DEFAULT_OPENAI_TIMEOUT_MS = 60_000;
+const DEFAULT_LARGE_MODEL_TIMEOUT_MS = 12 * 60_000;
 const DEFAULT_PROVIDER_TIMEOUT_MS: Record<Provider, number> = {
   openai: DEFAULT_OPENAI_TIMEOUT_MS,
   anthropic: DEFAULT_LLM_TIMEOUT_MS,
@@ -31,7 +34,13 @@ const DEFAULT_PROVIDER_TIMEOUT_MS: Record<Provider, number> = {
 
 const llmPlanDraftSchema = z.object({
   summary: z.string().trim().min(1),
-  actionPlans: z.array(actionPlanSchema).default([]),
+  actionPlanNarratives: z.array(z.object({
+    id: z.string().trim().min(1),
+    expectedBenefit: z.string().trim().optional(),
+    risk: z.string().trim().optional(),
+    whyNow: z.string().trim().optional(),
+    evidence: z.array(z.string()).optional()
+  })).default([]),
   warnings: z.array(z.string()).default([])
 });
 
@@ -43,41 +52,20 @@ const llmPlanDraftJsonSchema = {
       type: "string",
       description: "A concise player-facing SITREP summary answering the current request first."
     },
-    actionPlans: {
+    actionPlanNarratives: {
       type: "array",
-      description: "Ranked manual action plans. Return an empty array if the deterministic action plans should be preserved.",
+      description: "Narrative updates for existing deterministic action ids only. Do not invent new ids or reorder actions.",
       items: {
         type: "object",
         additionalProperties: false,
         properties: {
           id: { type: "string" },
-          title: { type: "string" },
-          priority: { type: "string", enum: ["low", "medium", "high", "critical"] },
-          category: { type: "string", enum: ["market", "operations", "logistics", "expansion", "risk"] },
           expectedBenefit: { type: "string" },
-          costSummary: { type: "string" },
           risk: { type: "string" },
-          evidence: { type: "array", items: { type: "string" } },
-          preparedCommands: {
-            type: "array",
-            items: {
-              type: "object",
-              additionalProperties: false,
-              properties: {
-                type: {
-                  type: "string",
-                  enum: ["buy_material", "move_cargo", "start_production", "adjust_sell_offer", "save_base_plan", "review"]
-                },
-                title: { type: "string" },
-                executable: { type: "boolean", enum: [false] },
-                payload: { type: "object", additionalProperties: true },
-                steps: { type: "array", items: { type: "string" } }
-              },
-              required: ["type", "title", "executable", "payload", "steps"]
-            }
-          }
+          whyNow: { type: "string" },
+          evidence: { type: "array", items: { type: "string" } }
         },
-        required: ["id", "title", "priority", "category", "expectedBenefit", "costSummary", "risk", "evidence", "preparedCommands"]
+        required: ["id"]
       }
     },
     warnings: {
@@ -86,19 +74,19 @@ const llmPlanDraftJsonSchema = {
       items: { type: "string" }
     }
   },
-  required: ["summary", "actionPlans", "warnings"]
+  required: ["summary", "actionPlanNarratives", "warnings"]
 } as const;
 
 export class LlmProviderError extends Error {
-  constructor(message: string, readonly provider: Provider, readonly status?: number) {
+  constructor(message: string, readonly provider: Provider, readonly status?: number, readonly model?: string) {
     super(message);
     this.name = "LlmProviderError";
   }
 }
 
 export class LlmProviderTimeoutError extends LlmProviderError {
-  constructor(provider: Provider, readonly timeoutMs: number) {
-    super(`${providerLabel(provider)} did not respond within ${formatTimeout(timeoutMs)}; showing deterministic sitrep. Try a faster model or increase timeout.`, provider);
+  constructor(provider: Provider, model: string, readonly timeoutMs: number) {
+    super(`${providerLabel(provider)} did not respond within ${formatTimeout(timeoutMs)}. Try a faster model or another provider.`, provider, undefined, model);
     this.name = "LlmProviderTimeoutError";
   }
 }
@@ -106,14 +94,21 @@ export class LlmProviderTimeoutError extends LlmProviderError {
 export class RestLlmPlanner implements LlmPlanner {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMsByProvider: Record<Provider, number>;
+  private readonly largeTimeoutMsByProvider: Record<Provider, number>;
 
   constructor(options: LlmPlannerOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     const fallbackTimeoutMs = options.timeoutMs ?? numberEnv("LLM_TIMEOUT_MS");
+    const fallbackLargeTimeoutMs = options.largeTimeoutMs ?? numberEnv("LLM_LARGE_MODEL_TIMEOUT_MS");
     this.timeoutMsByProvider = {
       openai: options.timeoutMsByProvider?.openai ?? numberEnv("OPENAI_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.openai,
       anthropic: options.timeoutMsByProvider?.anthropic ?? numberEnv("ANTHROPIC_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.anthropic,
       gemini: options.timeoutMsByProvider?.gemini ?? numberEnv("GEMINI_TIMEOUT_MS") ?? fallbackTimeoutMs ?? DEFAULT_PROVIDER_TIMEOUT_MS.gemini
+    };
+    this.largeTimeoutMsByProvider = {
+      openai: options.largeTimeoutMsByProvider?.openai ?? numberEnv("OPENAI_LARGE_MODEL_TIMEOUT_MS") ?? fallbackLargeTimeoutMs ?? DEFAULT_LARGE_MODEL_TIMEOUT_MS,
+      anthropic: options.largeTimeoutMsByProvider?.anthropic ?? numberEnv("ANTHROPIC_LARGE_MODEL_TIMEOUT_MS") ?? fallbackLargeTimeoutMs ?? DEFAULT_LARGE_MODEL_TIMEOUT_MS,
+      gemini: options.largeTimeoutMsByProvider?.gemini ?? numberEnv("GEMINI_LARGE_MODEL_TIMEOUT_MS") ?? fallbackLargeTimeoutMs ?? DEFAULT_LARGE_MODEL_TIMEOUT_MS
     };
   }
 
@@ -142,7 +137,7 @@ export class RestLlmPlanner implements LlmPlanner {
         return {
           ...input.deterministicSitrep,
           summary: draft.summary,
-          actionPlans: draft.actionPlans.length > 0 ? draft.actionPlans : input.deterministicSitrep.actionPlans,
+          actionPlans: mergeActionPlanNarratives(input.deterministicSitrep.actionPlans, draft.actionPlanNarratives),
           provider: input.provider,
           model: input.model,
           rawSnapshot: input.snapshot,
@@ -153,7 +148,7 @@ export class RestLlmPlanner implements LlmPlanner {
       validationHint = `The previous JSON failed validation: ${lastValidationError}`;
     }
 
-    throw new LlmProviderError(`Provider returned JSON that did not match the LLM draft schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider);
+    throw new LlmProviderError(`Provider returned JSON that did not match the LLM draft schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider, undefined, input.model);
   }
 
   private async callProvider(input: StructuredPlanInput, prompt: string): Promise<string> {
@@ -163,7 +158,7 @@ export class RestLlmPlanner implements LlmPlanner {
   }
 
   private async callOpenAi(input: StructuredPlanInput, prompt: string): Promise<string> {
-    const response = await this.fetchProvider(input.provider, "https://api.openai.com/v1/responses", {
+    const response = await this.fetchProvider(input.provider, input.model, "https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${input.providerApiKey}`,
@@ -186,14 +181,14 @@ export class RestLlmPlanner implements LlmPlanner {
       })
     });
 
-    const body = await parseProviderResponse(response, input.provider);
+    const body = await parseProviderResponse(response, input.provider, input.model);
     const content = extractOpenAiResponseText(body);
-    if (typeof content !== "string") throw new LlmProviderError("OpenAI response did not include message content.", input.provider, response.status);
+    if (typeof content !== "string") throw new LlmProviderError("OpenAI response did not include message content.", input.provider, response.status, input.model);
     return content;
   }
 
   private async callAnthropic(input: StructuredPlanInput, prompt: string): Promise<string> {
-    const response = await this.fetchProvider(input.provider, "https://api.anthropic.com/v1/messages", {
+    const response = await this.fetchProvider(input.provider, input.model, "https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
         "x-api-key": input.providerApiKey,
@@ -208,48 +203,68 @@ export class RestLlmPlanner implements LlmPlanner {
       })
     });
 
-    const body = await parseProviderResponse(response, input.provider);
+    const body = await parseProviderResponse(response, input.provider, input.model);
     const text = body.content?.find((part: unknown) => isRecord(part) && part.type === "text")?.text;
-    if (typeof text !== "string") throw new LlmProviderError("Anthropic response did not include text content.", input.provider, response.status);
+    if (typeof text !== "string") throw new LlmProviderError("Anthropic response did not include text content.", input.provider, response.status, input.model);
     return text;
   }
 
   private async callGemini(input: StructuredPlanInput, prompt: string): Promise<string> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(input.model)}:generateContent?key=${encodeURIComponent(input.providerApiKey)}`;
-    const response = await this.fetchProvider(input.provider, url, {
+    const response = await this.fetchProvider(input.provider, input.model, url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         contents: [{ role: "user", parts: [{ text: `${systemPrompt()}\n\n${prompt}` }] }],
         generationConfig: {
           responseMimeType: "application/json",
-          responseJsonSchema: llmPlanDraftJsonSchema
+          responseSchema: llmPlanDraftJsonSchema
         }
       })
     });
 
-    const body = await parseProviderResponse(response, input.provider);
+    const body = await parseProviderResponse(response, input.provider, input.model);
     const text = body.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("");
-    if (typeof text !== "string" || text.length === 0) throw new LlmProviderError("Gemini response did not include text content.", input.provider, response.status);
+    if (typeof text !== "string" || text.length === 0) throw new LlmProviderError("Gemini response did not include text content.", input.provider, response.status, input.model);
     return text;
   }
 
-  private async fetchProvider(provider: Provider, url: string, init: RequestInit): Promise<Response> {
+  private async fetchProvider(provider: Provider, model: string, url: string, init: RequestInit): Promise<Response> {
     const controller = new AbortController();
-    const timeoutMs = this.timeoutMsByProvider[provider];
+    const timeoutMs = resolveProviderTimeoutMs(provider, model, this.timeoutMsByProvider, this.largeTimeoutMsByProvider);
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       return await this.fetchImpl(url, { ...init, signal: controller.signal });
     } catch (error) {
       if (isAbortError(error)) {
-        throw new LlmProviderTimeoutError(provider, timeoutMs);
+        throw new LlmProviderTimeoutError(provider, model, timeoutMs);
       }
-      throw new LlmProviderError(error instanceof Error ? error.message : `${provider} request failed.`, provider);
+      throw new LlmProviderError(error instanceof Error ? error.message : `${provider} request failed.`, provider, undefined, model);
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+export function resolveProviderTimeoutMs(
+  provider: Provider,
+  model: string,
+  timeoutMsByProvider: Record<Provider, number> = DEFAULT_PROVIDER_TIMEOUT_MS,
+  largeTimeoutMsByProvider: Record<Provider, number> = {
+    openai: DEFAULT_LARGE_MODEL_TIMEOUT_MS,
+    anthropic: DEFAULT_LARGE_MODEL_TIMEOUT_MS,
+    gemini: DEFAULT_LARGE_MODEL_TIMEOUT_MS
+  }
+): number {
+  return isLargeModel(provider, model) ? largeTimeoutMsByProvider[provider] : timeoutMsByProvider[provider];
+}
+
+export function isLargeModel(_provider: Provider, model: string): boolean {
+  const lower = model.trim().toLowerCase();
+  if (!lower) return false;
+  if (/(^|[-_.])(flash-lite|flash|mini|nano|haiku)($|[-_.])/.test(lower)) return false;
+  return true;
 }
 
 function systemPrompt(): string {
@@ -279,6 +294,7 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
       topStockoutRisks: input.deterministicSitrep.stockoutRisks.slice(0, 8).map(compactStockoutRisk),
       topExpansionCandidates: input.deterministicSitrep.expansionCandidates.slice(0, 6).map(compactExpansionCandidate),
       topLogisticsMoves: input.deterministicSitrep.logisticsMoves.slice(0, 6).map(compactLogisticsMove),
+      situation: input.deterministicSitrep.situation,
       warnings: input.deterministicSitrep.warnings
     }
   };
@@ -286,11 +302,11 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
   return [
     validationHint,
     input.planningContext.userPrompt ? `The player request to answer first: ${input.planningContext.userPrompt}` : "",
-    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, actionPlans, warnings.",
-    "Do not return provider, model, generatedAt, rawSnapshot, marketSignals, stockoutRisks, expansionCandidates, or logisticsMoves.",
-    "Use only the compact top deterministic signals below; the server has the full dashboard data.",
-    "The server will preserve deterministic market, operations, logistics, and expansion data.",
-    "preparedCommands must always include executable:false. Return an empty actionPlans array if you cannot improve the deterministic action plans.",
+    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, actionPlanNarratives, warnings.",
+    "The deterministic strategy engine owns action ids, ranking, categories, scores, commands, and feasibility. Do not invent new action ids or reorder actions.",
+    "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, or evidence wording.",
+    "Do not return provider, model, generatedAt, rawSnapshot, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
+    "Use the situation, score breakdowns, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
     JSON.stringify(compact)
   ].filter(Boolean).join("\n\n");
 }
@@ -333,6 +349,10 @@ function compactActionPlan(plan: SitrepResponse["actionPlans"][number]) {
     title: plan.title,
     priority: plan.priority,
     category: plan.category,
+    score: plan.score,
+    confidence: plan.confidence,
+    whyNow: plan.whyNow,
+    scoreBreakdown: plan.scoreBreakdown,
     expectedBenefit: plan.expectedBenefit,
     costSummary: plan.costSummary,
     risk: plan.risk,
@@ -341,7 +361,6 @@ function compactActionPlan(plan: SitrepResponse["actionPlans"][number]) {
       type: command.type,
       title: command.title,
       executable: command.executable,
-      payload: command.payload,
       steps: command.steps.slice(0, 5)
     }))
   };
@@ -354,7 +373,16 @@ function compactMarketSignal(signal: SitrepResponse["marketSignals"][number]) {
     currentPrice: signal.currentPrice,
     avgPrice: signal.avgPrice,
     spreadPct: signal.spreadPct,
+    ownedQty: signal.ownedQty,
+    neededQty: signal.neededQty,
+    netNeedQty: signal.netNeedQty,
+    daysMarketSupply: signal.daysMarketSupply,
+    liquidityScore: signal.liquidityScore,
+    trendConfidence: signal.trendConfidence,
+    cashImpactPct: signal.cashImpactPct,
     trend: signal.trend,
+    volatilityPct: signal.volatilityPct,
+    recipeMarginPct: signal.recipeMarginPct,
     recommendation: signal.recommendation,
     rationale: signal.rationale.slice(0, 3)
   };
@@ -427,6 +455,24 @@ function mergeWarnings(base: string[], draft: string[]): string[] {
   return [...new Set([...base, ...draft])];
 }
 
+function mergeActionPlanNarratives(
+  plans: SitrepResponse["actionPlans"],
+  narratives: Array<{ id: string; expectedBenefit?: string; risk?: string; whyNow?: string; evidence?: string[] }>
+): SitrepResponse["actionPlans"] {
+  const byId = new Map(narratives.map((narrative) => [narrative.id, narrative]));
+  return plans.map((plan) => {
+    const narrative = byId.get(plan.id);
+    if (!narrative) return plan;
+    return {
+      ...plan,
+      expectedBenefit: narrative.expectedBenefit || plan.expectedBenefit,
+      risk: narrative.risk || plan.risk,
+      whyNow: narrative.whyNow || plan.whyNow,
+      evidence: narrative.evidence?.length ? [...new Set([...plan.evidence, ...narrative.evidence])].slice(0, 6) : plan.evidence
+    };
+  });
+}
+
 function numberEnv(name: string): number | undefined {
   const raw = process.env[name];
   if (!raw) return undefined;
@@ -440,11 +486,12 @@ function providerLabel(provider: Provider): string {
   return "Gemini";
 }
 
-function formatTimeout(timeoutMs: number): string {
+export function formatTimeout(timeoutMs: number): string {
+  if (timeoutMs >= 60_000 && timeoutMs % 60_000 === 0) return `${Math.round(timeoutMs / 60_000)}m`;
   return timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
 }
 
-async function parseProviderResponse(response: Response, provider: Provider): Promise<Record<string, any>> {
+async function parseProviderResponse(response: Response, provider: Provider, model: string): Promise<Record<string, any>> {
   const text = await response.text();
   let body: Record<string, any>;
   try {
@@ -455,7 +502,7 @@ async function parseProviderResponse(response: Response, provider: Provider): Pr
 
   if (!response.ok) {
     const message = body.error?.message ?? body.error ?? `${provider} returned ${response.status}.`;
-    throw new LlmProviderError(String(message), provider, response.status);
+    throw new LlmProviderError(String(message), provider, response.status, model);
   }
 
   return body;

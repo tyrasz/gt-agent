@@ -104,6 +104,13 @@ export const marketSignalSchema = z.object({
   spreadPct: z.number(),
   totalQtyAvailable: z.number().optional(),
   avgQtySoldDaily: z.number().optional(),
+  ownedQty: z.number().optional(),
+  neededQty: z.number().optional(),
+  netNeedQty: z.number().optional(),
+  daysMarketSupply: z.number().optional(),
+  liquidityScore: z.number().optional(),
+  trendConfidence: z.number().optional(),
+  cashImpactPct: z.number().optional(),
   trend: z.enum(["up", "down", "flat", "unknown"]),
   volatilityPct: z.number().optional(),
   recipeMarginPct: z.number().optional(),
@@ -154,6 +161,10 @@ export const actionPlanSchema = z.object({
   title: z.string(),
   priority: z.enum(["low", "medium", "high", "critical"]),
   category: z.enum(["market", "operations", "logistics", "expansion", "risk"]),
+  score: z.number().optional(),
+  confidence: z.enum(["low", "medium", "high"]).optional(),
+  whyNow: z.string().optional(),
+  scoreBreakdown: z.record(z.number()).optional(),
   expectedBenefit: z.string(),
   costSummary: z.string(),
   risk: z.string(),
@@ -161,6 +172,28 @@ export const actionPlanSchema = z.object({
   preparedCommands: z.array(preparedCommandSchema).default([])
 });
 export type ActionPlan = z.infer<typeof actionPlanSchema>;
+
+export const pressureSummarySchema = z.object({
+  status: z.enum(["low", "medium", "high", "critical"]),
+  score: z.number(),
+  summary: z.string()
+});
+export type PressureSummary = z.infer<typeof pressureSummarySchema>;
+
+export const companySituationSchema = z.object({
+  cash: pressureSummarySchema.extend({
+    current: z.number().optional(),
+    trendPct: z.number().optional()
+  }),
+  production: pressureSummarySchema,
+  logistics: pressureSummarySchema,
+  market: pressureSummarySchema,
+  expansion: pressureSummarySchema,
+  dataQuality: pressureSummarySchema.extend({
+    warnings: z.array(z.string()).default([])
+  })
+});
+export type CompanySituation = z.infer<typeof companySituationSchema>;
 
 export const rateLimitInfoSchema = z.object({
   endpoint: z.string(),
@@ -201,6 +234,7 @@ export const sitrepResponseSchema = z.object({
   expansionCandidates: z.array(expansionCandidateSchema),
   logisticsMoves: z.array(logisticsMoveSchema),
   warnings: z.array(z.string()).default([]),
+  situation: companySituationSchema.optional(),
   diagnostics: z.object({
     source: z.enum(["llm", "deterministic"]),
     timingsMs: z.record(z.number()),
