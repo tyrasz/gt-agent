@@ -22,6 +22,20 @@ export type LlmPlannerOptions = {
   timeoutMsByProvider?: Partial<Record<Provider, number>>;
   largeTimeoutMs?: number;
   largeTimeoutMsByProvider?: Partial<Record<Provider, number>>;
+  maxTokensByProvider?: Partial<Record<Provider, number>>;
+};
+
+type LlmPayloadDiagnostics = {
+  promptChars: number;
+  requestBytes: number;
+  outputTokenCap: number;
+  roughInputTokens: number;
+  payloadProfile: string;
+};
+
+type ProviderCallResult = {
+  text: string;
+  diagnostics: LlmPayloadDiagnostics;
 };
 
 const DEFAULT_LLM_TIMEOUT_MS = 30_000;
@@ -32,33 +46,41 @@ const DEFAULT_PROVIDER_TIMEOUT_MS: Record<Provider, number> = {
   anthropic: DEFAULT_LLM_TIMEOUT_MS,
   gemini: DEFAULT_LLM_TIMEOUT_MS
 };
+const DEFAULT_PROVIDER_MAX_TOKENS: Record<Provider, number> = {
+  openai: 2200,
+  anthropic: 2200,
+  gemini: 2200
+};
+
+const shortNarrativeSchema = z.string().trim().max(240);
+const decisionNarrativeSchema = z.string().trim().max(300);
 
 const llmPlanDraftSchema = z.object({
-  summary: z.string().trim().min(1),
+  summary: z.string().trim().min(1).max(900),
   decisionBriefNarrative: z.object({
-    thesis: z.string().trim().optional(),
-    recommendedPath: z.array(z.string()).optional(),
-    whyThisPath: z.array(z.string()).optional(),
+    thesis: z.string().trim().max(900).optional(),
+    recommendedPath: z.array(decisionNarrativeSchema).max(4).optional(),
+    whyThisPath: z.array(decisionNarrativeSchema).max(4).optional(),
     alternatives: z.array(z.object({
-      title: z.string().trim().min(1),
-      pros: z.array(z.string()).optional(),
-      cons: z.array(z.string()).optional(),
-      chooseWhen: z.string().trim().optional()
-    })).optional(),
-    constraints: z.array(z.string()).optional(),
-    inspectNext: z.array(z.string()).optional()
+      title: z.string().trim().min(1).max(160),
+      pros: z.array(shortNarrativeSchema).max(2).optional(),
+      cons: z.array(shortNarrativeSchema).max(2).optional(),
+      chooseWhen: decisionNarrativeSchema.optional()
+    })).max(3).optional(),
+    constraints: z.array(decisionNarrativeSchema).max(4).optional(),
+    inspectNext: z.array(decisionNarrativeSchema).max(4).optional()
   }).default({}),
   actionPlanNarratives: z.array(z.object({
     id: z.string().trim().min(1),
-    expectedBenefit: z.string().trim().optional(),
-    risk: z.string().trim().optional(),
-    whyNow: z.string().trim().optional(),
-    bestWhen: z.string().trim().optional(),
-    avoidIf: z.string().trim().optional(),
-    whatWouldChangeThis: z.string().trim().optional(),
-    evidence: z.array(z.string()).optional()
-  })).default([]),
-  warnings: z.array(z.string()).default([])
+    expectedBenefit: shortNarrativeSchema.optional(),
+    risk: shortNarrativeSchema.optional(),
+    whyNow: shortNarrativeSchema.optional(),
+    bestWhen: shortNarrativeSchema.optional(),
+    avoidIf: shortNarrativeSchema.optional(),
+    whatWouldChangeThis: shortNarrativeSchema.optional(),
+    evidence: z.array(shortNarrativeSchema).max(2).optional()
+  })).max(3).default([]),
+  warnings: z.array(decisionNarrativeSchema).max(4).default([])
 });
 
 const llmPlanDraftJsonSchema = {
@@ -67,6 +89,7 @@ const llmPlanDraftJsonSchema = {
   properties: {
     summary: {
       type: "string",
+      maxLength: 900,
       description: "A concise player-facing SITREP summary answering the current request first."
     },
     decisionBriefNarrative: {
@@ -74,50 +97,53 @@ const llmPlanDraftJsonSchema = {
       description: "Narrative updates for the existing deterministic Decision Brief. Preserve the deterministic decision shape and do not invent unsupported options.",
       additionalProperties: false,
       properties: {
-        thesis: { type: "string" },
-        recommendedPath: { type: "array", items: { type: "string" } },
-        whyThisPath: { type: "array", items: { type: "string" } },
+        thesis: { type: "string", maxLength: 900 },
+        recommendedPath: { type: "array", maxItems: 4, items: { type: "string", maxLength: 300 } },
+        whyThisPath: { type: "array", maxItems: 4, items: { type: "string", maxLength: 300 } },
         alternatives: {
           type: "array",
+          maxItems: 3,
           items: {
             type: "object",
             additionalProperties: false,
             properties: {
-              title: { type: "string" },
-              pros: { type: "array", items: { type: "string" } },
-              cons: { type: "array", items: { type: "string" } },
-              chooseWhen: { type: "string" }
+              title: { type: "string", maxLength: 160 },
+              pros: { type: "array", maxItems: 2, items: { type: "string", maxLength: 240 } },
+              cons: { type: "array", maxItems: 2, items: { type: "string", maxLength: 240 } },
+              chooseWhen: { type: "string", maxLength: 300 }
             },
             required: ["title"]
           }
         },
-        constraints: { type: "array", items: { type: "string" } },
-        inspectNext: { type: "array", items: { type: "string" } }
+        constraints: { type: "array", maxItems: 4, items: { type: "string", maxLength: 300 } },
+        inspectNext: { type: "array", maxItems: 4, items: { type: "string", maxLength: 300 } }
       }
     },
     actionPlanNarratives: {
       type: "array",
+      maxItems: 3,
       description: "Narrative updates for existing deterministic action ids only. Do not invent new ids or reorder actions.",
       items: {
         type: "object",
         additionalProperties: false,
         properties: {
           id: { type: "string" },
-          expectedBenefit: { type: "string" },
-          risk: { type: "string" },
-          whyNow: { type: "string" },
-          bestWhen: { type: "string" },
-          avoidIf: { type: "string" },
-          whatWouldChangeThis: { type: "string" },
-          evidence: { type: "array", items: { type: "string" } }
+          expectedBenefit: { type: "string", maxLength: 240 },
+          risk: { type: "string", maxLength: 240 },
+          whyNow: { type: "string", maxLength: 240 },
+          bestWhen: { type: "string", maxLength: 240 },
+          avoidIf: { type: "string", maxLength: 240 },
+          whatWouldChangeThis: { type: "string", maxLength: 240 },
+          evidence: { type: "array", maxItems: 2, items: { type: "string", maxLength: 240 } }
         },
         required: ["id"]
       }
     },
     warnings: {
       type: "array",
+      maxItems: 4,
       description: "Provider-side caveats that should be shown to the player.",
-      items: { type: "string" }
+      items: { type: "string", maxLength: 300 }
     }
   },
   required: ["summary", "decisionBriefNarrative", "actionPlanNarratives", "warnings"]
@@ -141,6 +167,7 @@ export class RestLlmPlanner implements LlmPlanner {
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMsByProvider: Record<Provider, number>;
   private readonly largeTimeoutMsByProvider: Record<Provider, number>;
+  private readonly maxTokensByProvider: Record<Provider, number>;
 
   constructor(options: LlmPlannerOptions = {}) {
     this.fetchImpl = options.fetchImpl ?? fetch;
@@ -156,24 +183,33 @@ export class RestLlmPlanner implements LlmPlanner {
       anthropic: options.largeTimeoutMsByProvider?.anthropic ?? numberEnv("ANTHROPIC_LARGE_MODEL_TIMEOUT_MS") ?? fallbackLargeTimeoutMs ?? DEFAULT_LARGE_MODEL_TIMEOUT_MS,
       gemini: options.largeTimeoutMsByProvider?.gemini ?? numberEnv("GEMINI_LARGE_MODEL_TIMEOUT_MS") ?? fallbackLargeTimeoutMs ?? DEFAULT_LARGE_MODEL_TIMEOUT_MS
     };
+    const fallbackMaxTokens = numberEnv("LLM_MAX_TOKENS");
+    this.maxTokensByProvider = {
+      openai: options.maxTokensByProvider?.openai ?? numberEnv("OPENAI_MAX_TOKENS") ?? fallbackMaxTokens ?? DEFAULT_PROVIDER_MAX_TOKENS.openai,
+      anthropic: options.maxTokensByProvider?.anthropic ?? numberEnv("ANTHROPIC_MAX_TOKENS") ?? fallbackMaxTokens ?? DEFAULT_PROVIDER_MAX_TOKENS.anthropic,
+      gemini: options.maxTokensByProvider?.gemini ?? numberEnv("GEMINI_MAX_TOKENS") ?? fallbackMaxTokens ?? DEFAULT_PROVIDER_MAX_TOKENS.gemini
+    };
   }
 
   async generateStructuredPlan(input: StructuredPlanInput): Promise<SitrepResponse> {
-    let validationHint = "";
     let lastValidationError = "";
+    let lastProviderText = "";
+    let lastDiagnostics: LlmPayloadDiagnostics | undefined;
 
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const prompt = buildPrompt(input, validationHint);
+      const prompt = attempt === 0 ? buildPrompt(input) : buildRepairPrompt(input, lastValidationError, lastProviderText);
       let text: string;
       let parsedJson: unknown;
 
       try {
-        text = await this.callProvider(input, prompt);
+        const result = await this.callProvider(input, prompt, attempt === 0 ? "compact" : "compact-repair");
+        text = result.text;
+        lastProviderText = text;
+        lastDiagnostics = result.diagnostics;
         parsedJson = parseJsonObject(text);
       } catch (error) {
         if (error instanceof LlmProviderError) throw error;
         lastValidationError = error instanceof Error ? error.message : "Provider response could not be parsed.";
-        validationHint = `The previous response could not be parsed as JSON: ${lastValidationError}`;
         continue;
       }
 
@@ -192,53 +228,66 @@ export class RestLlmPlanner implements LlmPlanner {
           provider: input.provider,
           model: input.model,
           rawSnapshot: input.snapshot,
-          warnings: mergeWarnings(input.deterministicSitrep.warnings, draft.warnings)
+          warnings: mergeWarnings(input.deterministicSitrep.warnings, draft.warnings),
+          diagnostics: {
+            source: "llm",
+            timingsMs: {},
+            ...lastDiagnostics
+          }
         };
       }
       lastValidationError = parsed.error.issues.map((issue) => `${issue.path.join(".")}: ${issue.message}`).join("; ");
-      validationHint = `The previous JSON failed validation: ${lastValidationError}`;
     }
 
     throw new LlmProviderError(`Provider returned JSON that did not match the LLM draft schema.${lastValidationError ? ` ${lastValidationError}` : ""}`, input.provider, undefined, input.model);
   }
 
-  private async callProvider(input: StructuredPlanInput, prompt: string): Promise<string> {
-    if (input.provider === "openai") return this.callOpenAi(input, prompt);
-    if (input.provider === "anthropic") return this.callAnthropic(input, prompt);
-    return this.callGemini(input, prompt);
+  private async callProvider(input: StructuredPlanInput, prompt: string, payloadProfile: string): Promise<ProviderCallResult> {
+    if (input.provider === "openai") return this.callOpenAi(input, prompt, payloadProfile);
+    if (input.provider === "anthropic") return this.callAnthropic(input, prompt, payloadProfile);
+    return this.callGemini(input, prompt, payloadProfile);
   }
 
-  private async callOpenAi(input: StructuredPlanInput, prompt: string): Promise<string> {
+  private async callOpenAi(input: StructuredPlanInput, prompt: string, payloadProfile: string): Promise<ProviderCallResult> {
+    const outputTokenCap = this.maxTokensByProvider.openai;
+    const requestBody = JSON.stringify({
+      model: input.model,
+      instructions: systemPrompt(),
+      input: prompt,
+      max_output_tokens: outputTokenCap,
+      store: false,
+      text: {
+        format: {
+          type: "json_schema",
+          name: "gt_agent_plan_draft",
+          schema: llmPlanDraftJsonSchema,
+          strict: false
+        }
+      }
+    });
     const response = await this.fetchProvider(input.provider, input.model, "https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${input.providerApiKey}`,
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: input.model,
-        instructions: systemPrompt(),
-        input: prompt,
-        max_output_tokens: 6000,
-        store: false,
-        text: {
-          format: {
-            type: "json_schema",
-            name: "gt_agent_plan_draft",
-            schema: llmPlanDraftJsonSchema,
-            strict: false
-          }
-        }
-      })
+      body: requestBody
     });
 
-    const body = await parseProviderResponse(response, input.provider, input.model);
-    const content = extractOpenAiResponseText(body);
+    const responseBody = await parseProviderResponse(response, input.provider, input.model);
+    const content = extractOpenAiResponseText(responseBody);
     if (typeof content !== "string") throw new LlmProviderError("OpenAI response did not include message content.", input.provider, response.status, input.model);
-    return content;
+    return { text: content, diagnostics: payloadDiagnostics(prompt, requestBody, outputTokenCap, payloadProfile) };
   }
 
-  private async callAnthropic(input: StructuredPlanInput, prompt: string): Promise<string> {
+  private async callAnthropic(input: StructuredPlanInput, prompt: string, payloadProfile: string): Promise<ProviderCallResult> {
+    const outputTokenCap = this.maxTokensByProvider.anthropic;
+    const requestBody = JSON.stringify({
+      model: input.model,
+      max_tokens: outputTokenCap,
+      system: systemPrompt(),
+      messages: [{ role: "user", content: prompt }]
+    });
     const response = await this.fetchProvider(input.provider, input.model, "https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -246,38 +295,36 @@ export class RestLlmPlanner implements LlmPlanner {
         "anthropic-version": "2023-06-01",
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({
-        model: input.model,
-        max_tokens: 6000,
-        system: systemPrompt(),
-        messages: [{ role: "user", content: prompt }]
-      })
+      body: requestBody
     });
 
     const body = await parseProviderResponse(response, input.provider, input.model);
     const text = body.content?.find((part: unknown) => isRecord(part) && part.type === "text")?.text;
     if (typeof text !== "string") throw new LlmProviderError("Anthropic response did not include text content.", input.provider, response.status, input.model);
-    return text;
+    return { text, diagnostics: payloadDiagnostics(prompt, requestBody, outputTokenCap, payloadProfile) };
   }
 
-  private async callGemini(input: StructuredPlanInput, prompt: string): Promise<string> {
+  private async callGemini(input: StructuredPlanInput, prompt: string, payloadProfile: string): Promise<ProviderCallResult> {
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(input.model)}:generateContent?key=${encodeURIComponent(input.providerApiKey)}`;
+    const outputTokenCap = this.maxTokensByProvider.gemini;
+    const requestBody = JSON.stringify({
+      contents: [{ role: "user", parts: [{ text: `${systemPrompt()}\n\n${prompt}` }] }],
+      generationConfig: {
+        maxOutputTokens: outputTokenCap,
+        responseMimeType: "application/json",
+        responseSchema: llmPlanDraftJsonSchema
+      }
+    });
     const response = await this.fetchProvider(input.provider, input.model, url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        contents: [{ role: "user", parts: [{ text: `${systemPrompt()}\n\n${prompt}` }] }],
-        generationConfig: {
-          responseMimeType: "application/json",
-          responseSchema: llmPlanDraftJsonSchema
-        }
-      })
+      body: requestBody
     });
 
     const body = await parseProviderResponse(response, input.provider, input.model);
     const text = body.candidates?.[0]?.content?.parts?.map((part: { text?: string }) => part.text ?? "").join("");
     if (typeof text !== "string" || text.length === 0) throw new LlmProviderError("Gemini response did not include text content.", input.provider, response.status, input.model);
-    return text;
+    return { text, diagnostics: payloadDiagnostics(prompt, requestBody, outputTokenCap, payloadProfile) };
   }
 
   private async fetchProvider(provider: Provider, model: string, url: string, init: RequestInit): Promise<Response> {
@@ -327,55 +374,121 @@ function systemPrompt(): string {
   ].join(" ");
 }
 
-function buildPrompt(input: StructuredPlanInput, validationHint: string): string {
-  const compact = {
-    planningContext: input.planningContext,
-    snapshotSummary: summarizeSnapshot(input.snapshot),
-    deterministicSitrep: {
-      summary: input.deterministicSitrep.summary,
-      counts: {
-        actionPlans: input.deterministicSitrep.actionPlans.length,
-        decisionActions: input.deterministicSitrep.decisionPanel.actions.length,
-        marketSignals: input.deterministicSitrep.marketSignals.length,
-        stockoutRisks: input.deterministicSitrep.stockoutRisks.length,
-        expansionCandidates: input.deterministicSitrep.expansionCandidates.length,
-        logisticsMoves: input.deterministicSitrep.logisticsMoves.length
-      },
-      decisionBrief: input.deterministicSitrep.decisionBrief,
-      decisionPanel: compactDecisionPanel(input.deterministicSitrep.decisionPanel),
-      projections: compactProjections(input.deterministicSitrep.projections),
-      profitability: compactProfitability(input.deterministicSitrep.profitability),
-      history: compactHistory(input.deterministicSitrep.history),
-      trendSignals: input.deterministicSitrep.trendSignals?.slice(0, 8),
-      chainOpportunities: input.deterministicSitrep.chainOpportunities?.slice(0, 6).map(compactChainOpportunity),
-      topActionPlans: input.deterministicSitrep.actionPlans.slice(0, 5).map(compactActionPlan),
-      topMarketSignals: input.deterministicSitrep.marketSignals.slice(0, 8).map(compactMarketSignal),
-      topStockoutRisks: input.deterministicSitrep.stockoutRisks.slice(0, 8).map(compactStockoutRisk),
-      topExpansionCandidates: input.deterministicSitrep.expansionCandidates.slice(0, 6).map(compactExpansionCandidate),
-      topLogisticsMoves: input.deterministicSitrep.logisticsMoves.slice(0, 6).map(compactLogisticsMove),
-      situation: compactSituation(input.deterministicSitrep.situation),
-      warnings: input.deterministicSitrep.warnings
-    }
-  };
+function buildPrompt(input: StructuredPlanInput): string {
+  return buildCompactPrompt(input);
+}
 
+function buildRepairPrompt(input: StructuredPlanInput, validationError: string, previousResponse: string): string {
+  const allowedActionIds = input.deterministicSitrep.actionPlans.slice(0, 3).map((plan) => ({
+    id: plan.id,
+    title: plan.title
+  }));
+  const alternativeTitles = input.deterministicSitrep.decisionBrief.alternatives.slice(0, 3).map((alternative) => alternative.title);
   return [
-    validationHint,
+    `The previous JSON failed validation: ${validationError || "unknown validation error"}.`,
+    "Return a corrected JSON object only with keys: summary, decisionBriefNarrative, actionPlanNarratives, warnings.",
+    "Keep limits: summary <= 900 chars; decisionBriefNarrative lists <= 4; actionPlanNarratives <= 3 existing ids; evidence/pros/cons <= 2; warnings <= 4.",
+    "Use only the allowed deterministic action ids and existing alternative titles below. Do not add actions, reorder actions, change scores, or promote blocked targets.",
+    JSON.stringify({
+      playerRequest: input.planningContext.userPrompt,
+      allowedActionIds,
+      alternativeTitles,
+      previousResponseExcerpt: truncateText(previousResponse, 2200)
+    })
+  ].filter(Boolean).join("\n\n");
+}
+
+function buildCompactPrompt(input: StructuredPlanInput): string {
+  const compact = buildCompactPromptPayload(input);
+  return [
     input.planningContext.userPrompt ? `The player request to answer first: ${input.planningContext.userPrompt}` : "",
-    "Create only an LlmPlanDraft JSON object with these top-level keys: summary, decisionBriefNarrative, actionPlanNarratives, warnings.",
-    "The deterministic strategy engine owns action ids, ranking, categories, scores, commands, and feasibility. Do not invent new action ids or reorder actions.",
-    "For decisionBriefNarrative, improve wording for the existing deterministic Decision Brief only. Do not change confidence or add alternatives whose titles are not already present.",
-    "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, bestWhen, avoidIf, whatWouldChangeThis, or evidence wording.",
-    "Use projections to explain the timeline, but do not add horizons, change projected quantities, or alter projection actionIds.",
-    "Use decisionPanel to explain contract and exchange choices, but do not add decision ids, reorder actions, or change contract/exchange feasibility.",
-    "Market signals with recommendation watch, avoid, or restock are context only. Do not present them as highest-impact moves unless a matching deterministic action id exists.",
-    "Use profitability to explain company-fit profit moves and feasible long-horizon restructure targets, but do not change profitability calculations or rankings.",
-    "Blocked profitability targets are context only. Do not recommend blockedTargets as actions, timeline steps, or Decision Brief recommended-path items.",
-    "Use history, trendSignals, and chainOpportunities to explain what persisted or changed, but do not change trend math, chain rankings, or action ids.",
-    "Do not return provider, model, generatedAt, rawSnapshot, decisionPanel, profitability, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
-    "Use the situation, score breakdowns, profitability, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
-    "Money values from GT raw fields are integer cents. Use the provided display strings such as cashDisplay and costSummary in player-facing prose.",
+    "Return JSON only: summary, decisionBriefNarrative, actionPlanNarratives, warnings.",
+    "Be concise: summary <= 900 chars; decision lists <= 4; narratives <= 3 existing action ids; each field <= 240 chars; evidence <= 2.",
+    "Do not invent, reorder, promote, or demote actions. Deterministic ids, scores, math, buffer quantities, profitability, and timeline are final.",
+    "Use watch/restock/avoid markets and blocked targets as context only unless a matching action id exists.",
+    "Use display strings for money; raw GT money fields are cents.",
     JSON.stringify(compact)
   ].filter(Boolean).join("\n\n");
+}
+
+function buildCompactPromptPayload(input: StructuredPlanInput) {
+  const sitrep = input.deterministicSitrep;
+  const snapshotSummary = summarizeSnapshot(input.snapshot);
+  return {
+    request: {
+      userPrompt: input.planningContext.userPrompt,
+      goal: input.planningContext.shortTermGoal,
+      notes: input.planningContext.notes,
+      autonomyHours: input.planningContext.autonomyHours,
+      cashRiskLevel: input.planningContext.cashRiskLevel,
+      nextLoginAt: input.planningContext.nextLoginAt
+    },
+    company: {
+      ...snapshotSummary.company,
+      counts: snapshotSummary.counts
+    },
+    situation: compactAnthropicSituation(sitrep.situation),
+    operationsBrief: compactOperationsBrief(sitrep.operationsBrief),
+    decisionBrief: compactAnthropicDecisionBrief(sitrep.decisionBrief),
+    timeline: sitrep.projections.bands.map((band) => ({
+      horizonId: band.horizonId,
+      summary: band.summary,
+      confidence: band.confidence,
+      actionIds: band.actionIds.slice(0, 3),
+      needs: band.materialNeeds.slice(0, 2).map((need) => ({
+        matName: need.matName,
+        netNeedQty: need.netNeedQty
+      })),
+      constraints: band.constraints.slice(0, 2),
+      inspectNext: band.inspectNext.slice(0, 2)
+    })),
+    actions: sitrep.actionPlans.slice(0, 3).map(compactAnthropicActionPlan),
+    decisionActions: sitrep.decisionPanel.actions.slice(0, 3).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      action: action.action,
+      title: action.title,
+      score: action.score,
+      expectedValueDisplay: action.expectedValue !== undefined ? formatMoney(action.expectedValue) : undefined,
+      cashImpactPct: action.cashImpactPct,
+      blockers: action.blockers.slice(0, 2),
+      evidence: action.evidence.slice(0, 2)
+    })),
+    profitability: compactAnthropicProfitability(sitrep.profitability),
+    markets: sitrep.marketSignals.slice(0, 5).map((signal) => ({
+      matName: signal.matName,
+      recommendation: signal.recommendation,
+      spreadPct: signal.spreadPct,
+      spreadValue: signal.spreadValue,
+      materialityPct: signal.materialityPct,
+      ownedQty: signal.ownedQty,
+      netNeedQty: signal.netNeedQty,
+      liquidityScore: signal.liquidityScore,
+      rationale: signal.rationale.slice(0, 2)
+    })),
+    risks: sitrep.stockoutRisks.slice(0, 4).map((risk) => ({
+      matName: risk.matName,
+      shortageQty: risk.shortageQty,
+      hoursUntilStockout: risk.hoursUntilStockout,
+      severity: risk.severity,
+      affectedBases: risk.affectedBases.slice(0, 2)
+    })),
+    logistics: sitrep.logisticsMoves.slice(0, 3).map((move) => ({
+      materialName: move.materialName,
+      from: move.from,
+      to: move.to,
+      quantity: move.quantity,
+      tonnes: move.tonnes,
+      reason: move.reason
+    })),
+    trends: sitrep.trendSignals?.slice(0, 4).map((trend) => ({
+      kind: trend.kind,
+      severity: trend.severity,
+      title: trend.title,
+      summary: trend.summary
+    })),
+    warnings: sitrep.warnings.slice(0, 4)
+  };
 }
 
 function summarizeSnapshot(snapshot: GameSnapshot) {
@@ -415,332 +528,178 @@ function summarizeSnapshot(snapshot: GameSnapshot) {
   };
 }
 
-function compactActionPlan(plan: SitrepResponse["actionPlans"][number]) {
+function compactOperationsBrief(brief: SitrepResponse["operationsBrief"]) {
   return {
-    id: plan.id,
-    title: plan.title,
-    priority: plan.priority,
-    category: plan.category,
-    score: plan.score,
-    confidence: plan.confidence,
-    horizonLabel: plan.horizonLabel,
-    latestUsefulByHours: plan.latestUsefulByHours,
-    futureTriggers: plan.futureTriggers,
-    whyNow: plan.whyNow,
-    bestWhen: plan.bestWhen,
-    avoidIf: plan.avoidIf,
-    whatWouldChangeThis: plan.whatWouldChangeThis,
-    scoreBreakdown: plan.scoreBreakdown,
-    expectedBenefit: plan.expectedBenefit,
-    costSummary: plan.costSummary,
-    risk: plan.risk,
-    evidence: plan.evidence.slice(0, 4),
-    preparedCommands: plan.preparedCommands.slice(0, 2).map((command) => ({
-      type: command.type,
-      title: command.title,
-      executable: command.executable,
-      steps: command.steps.slice(0, 5)
+    expectedIncome: {
+      horizonHours: brief.expectedIncome.horizonHours,
+      netProfitDisplay: formatMoney(brief.expectedIncome.netProfit),
+      grossOutputValueDisplay: formatMoney(brief.expectedIncome.grossOutputValue),
+      inputCostDisplay: formatMoney(brief.expectedIncome.inputCost),
+      workerConsumableCostDisplay: brief.expectedIncome.workerConsumableCost !== undefined ? formatMoney(brief.expectedIncome.workerConsumableCost) : undefined,
+      confidence: brief.expectedIncome.confidence,
+      topLines: brief.expectedIncome.lines.slice(0, 3).map((line) => ({
+        outputMatName: line.outputMatName,
+        baseName: line.baseName,
+        netProfitDisplay: formatMoney(line.netProfit),
+        confidence: line.confidence
+      }))
+    },
+    problems: brief.problems.slice(0, 4).map((problem) => ({
+      type: problem.type,
+      severity: problem.severity,
+      title: problem.title,
+      summary: problem.summary
+    })),
+    bufferPlan: {
+      targetHours: brief.bufferPlan.targetHours,
+      totalFillCostDisplay: formatMoney(brief.bufferPlan.totalFillCost),
+      materials: brief.bufferPlan.materials.slice(0, 4).map((material) => ({
+        matName: material.matName,
+        coverageHours: material.coverageHours,
+        buyQty: material.buyQty,
+        estimatedCostDisplay: material.estimatedCost !== undefined ? formatMoney(material.estimatedCost) : undefined,
+        urgency: material.urgency
+      }))
+    },
+    surplusPlans: brief.surplusPlans.slice(0, 4).map((plan) => ({
+      matName: plan.matName,
+      surplusQty: plan.surplusQty,
+      surplusValueDisplay: plan.surplusValue !== undefined ? formatMoney(plan.surplusValue) : undefined,
+      recommendation: plan.recommendation,
+      reason: plan.reason
     }))
   };
 }
 
-function compactMarketSignal(signal: SitrepResponse["marketSignals"][number]) {
-  return {
-    matId: signal.matId,
-    matName: signal.matName,
-    currentPrice: signal.currentPrice,
-    avgPrice: signal.avgPrice,
-    spreadPct: signal.spreadPct,
-    ownedQty: signal.ownedQty,
-    neededQty: signal.neededQty,
-    netNeedQty: signal.netNeedQty,
-    grossValue: signal.grossValue,
-    spreadValue: signal.spreadValue,
-    materialityPct: signal.materialityPct,
-    grossCashImpactPct: signal.grossCashImpactPct,
-    daysMarketSupply: signal.daysMarketSupply,
-    liquidityScore: signal.liquidityScore,
-    trendConfidence: signal.trendConfidence,
-    cashImpactPct: signal.cashImpactPct,
-    trend: signal.trend,
-    volatilityPct: signal.volatilityPct,
-    recipeMarginPct: signal.recipeMarginPct,
-    recommendation: signal.recommendation,
-    rationale: signal.rationale.slice(0, 3)
-  };
-}
-
-function compactStockoutRisk(risk: SitrepResponse["stockoutRisks"][number]) {
-  return {
-    matId: risk.matId,
-    matName: risk.matName,
-    availableQty: risk.availableQty,
-    requiredQty: risk.requiredQty,
-    shortageQty: risk.shortageQty,
-    hoursUntilStockout: risk.hoursUntilStockout,
-    severity: risk.severity,
-    affectedBases: risk.affectedBases.slice(0, 5)
-  };
-}
-
-function compactExpansionCandidate(candidate: SitrepResponse["expansionCandidates"][number]) {
-  return {
-    title: candidate.title,
-    type: candidate.type,
-    priority: candidate.priority,
-    estimatedCost: candidate.estimatedCost,
-    blockers: candidate.blockers.slice(0, 4),
-    rationale: candidate.rationale.slice(0, 4)
-  };
-}
-
-function compactLogisticsMove(move: SitrepResponse["logisticsMoves"][number]) {
-  return {
-    from: move.from,
-    to: move.to,
-    matId: move.matId,
-    materialName: move.materialName,
-    quantity: move.quantity,
-    tonnes: move.tonnes,
-    reason: move.reason,
-    steps: move.steps.slice(0, 5)
-  };
-}
-
-function compactSituation(situation: SitrepResponse["situation"]) {
+function compactAnthropicSituation(situation: SitrepResponse["situation"]) {
   if (!situation) return undefined;
   return {
     cash: {
       status: situation.cash.status,
-      score: situation.cash.score,
       summary: situation.cash.summary,
-      currentCents: situation.cash.current,
       currentDisplay: situation.cash.current !== undefined ? formatMoney(situation.cash.current) : undefined,
       trendPct: situation.cash.trendPct
     },
-    production: situation.production,
-    logistics: situation.logistics,
-    market: situation.market,
-    expansion: situation.expansion,
-    dataQuality: situation.dataQuality
+    production: situation.production.summary,
+    logistics: situation.logistics.summary,
+    market: situation.market.summary,
+    expansion: situation.expansion.summary,
+    data: situation.dataQuality.summary
   };
 }
 
-function compactDecisionPanel(panel: SitrepResponse["decisionPanel"]) {
+function compactAnthropicDecisionBrief(brief: SitrepResponse["decisionBrief"]) {
   return {
-    summary: panel.summary,
-    actions: panel.actions.slice(0, 8).map((action) => ({
-      id: action.id,
-      kind: action.kind,
-      action: action.action,
-      title: action.title,
-      priority: action.priority,
-      score: action.score,
-      confidence: action.confidence,
-      expectedValue: action.expectedValue,
-      expectedValueDisplay: action.expectedValue !== undefined ? formatMoney(action.expectedValue) : undefined,
-      cashImpactPct: action.cashImpactPct,
-      deadline: action.deadline,
-      requirements: action.requirements.slice(0, 4),
-      blockers: action.blockers.slice(0, 4),
-      evidence: action.evidence.slice(0, 4),
-      preparedCommands: action.preparedCommands.slice(0, 2).map((command) => ({
-        type: command.type,
-        title: command.title,
-        executable: command.executable,
-        steps: command.steps.slice(0, 4)
-      }))
+    thesis: brief.thesis,
+    recommendedPath: brief.recommendedPath.slice(0, 4),
+    whyThisPath: brief.whyThisPath.slice(0, 4),
+    alternatives: brief.alternatives.slice(0, 3).map((alternative) => ({
+      title: alternative.title,
+      pros: alternative.pros.slice(0, 2),
+      cons: alternative.cons.slice(0, 2),
+      chooseWhen: alternative.chooseWhen
     })),
-    warnings: panel.warnings
+    constraints: brief.constraints.slice(0, 4),
+    inspectNext: brief.inspectNext.slice(0, 4),
+    confidence: brief.confidence
   };
 }
 
-function compactProjections(projections: SitrepResponse["projections"]) {
+function compactAnthropicActionPlan(plan: SitrepResponse["actionPlans"][number]) {
   return {
-    horizons: projections.horizons,
-    bands: projections.bands.map((band) => ({
-      horizonId: band.horizonId,
-      summary: band.summary,
-      confidence: band.confidence,
-      actionIds: band.actionIds,
-      materialNeeds: band.materialNeeds.slice(0, 3).map((need) => ({
-        matId: need.matId,
-        matName: need.matName,
-        requiredQty: need.requiredQty,
-        availableQty: need.availableQty,
-        netNeedQty: need.netNeedQty
-      })),
-      constraints: band.constraints.slice(0, 3),
-      inspectNext: band.inspectNext.slice(0, 3)
-    })),
-    warnings: projections.warnings
+    id: plan.id,
+    title: plan.title,
+    category: plan.category,
+    score: plan.score,
+    confidence: plan.confidence,
+    horizonLabel: plan.horizonLabel,
+    profitPerHourDisplay: plan.profitPerHour !== undefined ? `${formatMoney(plan.profitPerHour)}/h` : undefined,
+    marginPct: plan.marginPct,
+    capitalFit: plan.capitalFit,
+    whyNow: plan.whyNow,
+    expectedBenefit: plan.expectedBenefit,
+    costSummary: plan.costSummary,
+    risk: plan.risk,
+    evidence: plan.evidence.slice(0, 2)
   };
 }
 
-function compactProfitability(profitability: SitrepResponse["profitability"]) {
+function compactAnthropicProfitability(profitability: SitrepResponse["profitability"]) {
   if (!profitability) return undefined;
   return {
-    companyFit: profitability.companyFit.slice(0, 5).map(compactProfitabilityOpportunity),
-    nextSteps: profitability.nextSteps.slice(0, 5).map(compactProfitabilityOpportunity),
-    aspirationalTargets: profitability.aspirationalTargets.slice(0, 5).map(compactProfitabilityOpportunity),
-    blockedTargets: profitability.blockedTargets.slice(0, 5).map(compactProfitabilityOpportunity),
-    globalTargets: profitability.globalTargets.slice(0, 5).map(compactProfitabilityOpportunity),
-    chainOpportunities: profitability.chainOpportunities.slice(0, 5).map(compactChainOpportunity),
-    chains: profitability.chains.slice(0, 5).map((chain) => ({
-      id: chain.id,
-      title: chain.title,
-      recipeIds: chain.recipeIds,
-      outputMatName: chain.outputMatName,
-      totalNetProfitPerHour: chain.totalNetProfitPerHour,
-      totalNetProfitPerHourDisplay: `${formatMoney(chain.totalNetProfitPerHour)}/h`,
-      marginPct: chain.marginPct,
-      inputCoveragePct: chain.inputCoveragePct,
-      liquidityScore: chain.liquidityScore,
-      companyFit: chain.companyFit,
-      capitalFit: chain.capitalFit,
-      setupDistance: chain.setupDistance,
-      resourceAccess: chain.resourceAccess,
-      setupCostCompleteness: chain.setupCostCompleteness,
-      knownMinimumCapital: chain.knownMinimumCapital,
-      knownMinimumCapitalDisplay: chain.knownMinimumCapital !== undefined ? formatMoney(chain.knownMinimumCapital) : undefined,
-      knownCapitalGap: chain.knownCapitalGap,
-      knownCapitalGapDisplay: chain.knownCapitalGap !== undefined ? formatMoney(chain.knownCapitalGap) : undefined,
-      firstPracticalStep: chain.firstPracticalStep,
-      missingPrerequisites: chain.missingPrerequisites?.slice(0, 4),
-      unpricedRequirements: chain.unpricedRequirements?.slice(0, 4),
-      blockingReasons: chain.blockingReasons?.slice(0, 4),
-      confidence: chain.confidence,
-      setupGaps: chain.setupGaps.slice(0, 4),
-      steps: chain.steps.map((step) => ({
-        recipeId: step.recipeId,
-        outputMatName: step.outputMatName,
-        buildingName: step.buildingName,
-        netEstimatePerHour: step.netEstimatePerHour,
-        companyFit: step.companyFit,
-        capitalFit: step.capitalFit,
-        resourceAccess: step.resourceAccess,
-        setupCostCompleteness: step.setupCostCompleteness,
-        blockingReasons: step.blockingReasons?.slice(0, 3)
-      }))
-    })),
-    topRecipes: profitability.recipes.slice(0, 8).map((recipe) => ({
-      recipeId: recipe.recipeId,
-      recipeName: recipe.recipeName,
-      outputMatName: recipe.outputMatName,
-      buildingName: recipe.buildingName,
-      netEstimatePerHour: recipe.netEstimatePerHour,
-      netEstimatePerHourDisplay: `${formatMoney(recipe.netEstimatePerHour)}/h`,
-      marginPct: recipe.marginPct,
-      inputCoveragePct: recipe.inputCoveragePct,
-      liquidityScore: recipe.liquidityScore,
-      companyFit: recipe.companyFit,
-      capitalFit: recipe.capitalFit,
-      setupDistance: recipe.setupDistance,
-      resourceAccess: recipe.resourceAccess,
-      planetRequirement: recipe.planetRequirement,
-      techRequirement: recipe.techRequirement,
-      setupCostCompleteness: recipe.setupCostCompleteness,
-      knownMinimumCapital: recipe.knownMinimumCapital,
-      knownMinimumCapitalDisplay: recipe.knownMinimumCapital !== undefined ? formatMoney(recipe.knownMinimumCapital) : undefined,
-      knownCapitalGap: recipe.knownCapitalGap,
-      knownCapitalGapDisplay: recipe.knownCapitalGap !== undefined ? formatMoney(recipe.knownCapitalGap) : undefined,
-      firstPracticalStep: recipe.firstPracticalStep,
-      missingPrerequisites: recipe.missingPrerequisites?.slice(0, 4),
-      unpricedRequirements: recipe.unpricedRequirements?.slice(0, 4),
-      blockingReasons: recipe.blockingReasons?.slice(0, 4),
-      setupGaps: recipe.setupGaps.slice(0, 4),
-      confidence: recipe.priceConfidence
-    })),
-    assumptions: profitability.assumptions,
-    warnings: profitability.warnings.slice(0, 5)
+    companyFit: profitability.companyFit.slice(0, 3).map(compactAnthropicProfitabilityOpportunity),
+    nextSteps: profitability.nextSteps.slice(0, 3).map(compactAnthropicProfitabilityOpportunity),
+    aspirationalTargets: profitability.aspirationalTargets.slice(0, 2).map(compactAnthropicProfitabilityOpportunity),
+    blockedTargets: profitability.blockedTargets.slice(0, 2).map(compactAnthropicProfitabilityOpportunity),
+    chainOpportunities: profitability.chainOpportunities.slice(0, 3).map(compactAnthropicChainOpportunity),
+    assumptions: profitability.assumptions.slice(0, 3),
+    warnings: profitability.warnings.slice(0, 3)
   };
 }
 
-function compactProfitabilityOpportunity(opportunity: NonNullable<SitrepResponse["profitability"]>["companyFit"][number]) {
+function compactAnthropicProfitabilityOpportunity(opportunity: NonNullable<SitrepResponse["profitability"]>["companyFit"][number]) {
   return {
     id: opportunity.id,
     kind: opportunity.kind,
-    recipeId: opportunity.recipeId,
     title: opportunity.title,
     recommendation: opportunity.recommendation,
     horizonLabel: opportunity.horizonLabel,
     score: opportunity.score,
     confidence: opportunity.confidence,
-    capitalFit: opportunity.capitalFit,
-    setupDistance: opportunity.setupDistance,
-    resourceAccess: opportunity.resourceAccess,
-    planetRequirement: opportunity.planetRequirement,
-    techRequirement: opportunity.techRequirement,
-    setupCostCompleteness: opportunity.setupCostCompleteness,
-    setupCostEstimate: opportunity.setupCostEstimate,
-    knownMinimumCapital: opportunity.knownMinimumCapital,
-    knownMinimumCapitalDisplay: opportunity.knownMinimumCapital !== undefined ? formatMoney(opportunity.knownMinimumCapital) : undefined,
-    knownCapitalGap: opportunity.knownCapitalGap,
-    knownCapitalGapDisplay: opportunity.knownCapitalGap !== undefined ? formatMoney(opportunity.knownCapitalGap) : undefined,
-    cashImpactPct: opportunity.cashImpactPct,
-    firstPracticalStep: opportunity.firstPracticalStep,
-    missingPrerequisites: opportunity.missingPrerequisites?.slice(0, 4),
-    unpricedRequirements: opportunity.unpricedRequirements?.slice(0, 4),
-    blockingReasons: opportunity.blockingReasons?.slice(0, 4),
-    profitPerHour: opportunity.profitPerHour,
     profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
     marginPct: opportunity.marginPct,
-    rationale: opportunity.rationale.slice(0, 3),
-    blockers: opportunity.blockers.slice(0, 4)
+    capitalFit: opportunity.capitalFit,
+    setupDistance: opportunity.setupDistance,
+    knownMinimumCapitalDisplay: opportunity.knownMinimumCapital !== undefined ? formatMoney(opportunity.knownMinimumCapital) : undefined,
+    knownCapitalGapDisplay: opportunity.knownCapitalGap !== undefined ? formatMoney(opportunity.knownCapitalGap) : undefined,
+    firstPracticalStep: opportunity.firstPracticalStep,
+    blockers: uniqueCompactStrings([
+      ...(opportunity.blockers ?? []),
+      ...(opportunity.blockingReasons ?? []),
+      ...(opportunity.unpricedRequirements ?? [])
+    ], 3),
+    rationale: opportunity.rationale.slice(0, 2)
   };
 }
 
-function compactChainOpportunity(opportunity: NonNullable<SitrepResponse["chainOpportunities"]>[number]) {
+function compactAnthropicChainOpportunity(opportunity: NonNullable<SitrepResponse["chainOpportunities"]>[number]) {
   return {
     id: opportunity.id,
     kind: opportunity.kind,
-    chainId: opportunity.chainId,
     title: opportunity.title,
     recommendation: opportunity.recommendation,
     horizonLabel: opportunity.horizonLabel,
     score: opportunity.score,
     confidence: opportunity.confidence,
-    profitPerHour: opportunity.profitPerHour,
     profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
     marginPct: opportunity.marginPct,
-    inputCoveragePct: opportunity.inputCoveragePct,
     capitalFit: opportunity.capitalFit,
     setupDistance: opportunity.setupDistance,
-    resourceAccess: opportunity.resourceAccess,
-    setupCostCompleteness: opportunity.setupCostCompleteness,
-    setupCostEstimate: opportunity.setupCostEstimate,
-    knownMinimumCapital: opportunity.knownMinimumCapital,
-    knownMinimumCapitalDisplay: opportunity.knownMinimumCapital !== undefined ? formatMoney(opportunity.knownMinimumCapital) : undefined,
-    knownCapitalGap: opportunity.knownCapitalGap,
-    knownCapitalGapDisplay: opportunity.knownCapitalGap !== undefined ? formatMoney(opportunity.knownCapitalGap) : undefined,
-    cashImpactPct: opportunity.cashImpactPct,
     firstPracticalStep: opportunity.firstPracticalStep,
-    missingPrerequisites: opportunity.missingPrerequisites?.slice(0, 4),
-    unpricedRequirements: opportunity.unpricedRequirements?.slice(0, 4),
-    blockingReasons: opportunity.blockingReasons?.slice(0, 4),
-    rationale: opportunity.rationale.slice(0, 3),
-    blockers: opportunity.blockers.slice(0, 4)
+    blockers: uniqueCompactStrings([
+      ...(opportunity.blockers ?? []),
+      ...(opportunity.blockingReasons ?? []),
+      ...(opportunity.unpricedRequirements ?? [])
+    ], 3)
   };
 }
 
-function compactHistory(history: SitrepResponse["history"]) {
-  if (!history) return undefined;
+function uniqueCompactStrings(items: Array<string | undefined>, limit: number): string[] {
+  return [...new Set(items.filter((item): item is string => Boolean(item && item.trim())))].slice(0, limit);
+}
+
+function payloadDiagnostics(prompt: string, requestBody: string, outputTokenCap: number, payloadProfile: string): LlmPayloadDiagnostics {
   return {
-    lastRunAt: history.lastRunAt,
-    entries: history.entries.slice(-4).map((entry) => ({
-      generatedAt: entry.generatedAt,
-      companyName: entry.companyName,
-      cash: entry.cash,
-      companyValue: entry.companyValue,
-      topActionTitle: entry.topActionTitle,
-      highPriorityCount: entry.highPriorityCount,
-      stockoutMatNames: entry.stockoutMatNames.slice(0, 4),
-      profitableRecipeNames: entry.profitableRecipeNames.slice(0, 4),
-      marketSignalMatNames: entry.marketSignalMatNames.slice(0, 4),
-      chainNames: entry.chainNames.slice(0, 4)
-    })),
-    trendSignals: history.trendSignals.slice(0, 8)
+    promptChars: prompt.length,
+    requestBytes: new TextEncoder().encode(requestBody).length,
+    outputTokenCap,
+    roughInputTokens: Math.ceil(prompt.length / 4),
+    payloadProfile
   };
+}
+
+function truncateText(value: string, maxChars: number): string {
+  return value.length > maxChars ? `${value.slice(0, maxChars)}...` : value;
 }
 
 function parseJsonObject(text: string): unknown {

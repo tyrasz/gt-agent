@@ -145,6 +145,8 @@ describe("analysis", () => {
     expect(sitrep.decisionBrief.recommendedPath.length).toBeGreaterThan(0);
     expect(sitrep.decisionPanel.actions.length).toBeGreaterThan(0);
     expect(sitrep.projections.horizons.map((horizon) => horizon.hours)).toEqual([12, 24, 72, 168]);
+    expect(sitrep.operationsBrief.expectedIncome.netProfit).toBeGreaterThan(0);
+    expect(sitrep.operationsBrief.bufferPlan.targetHours).toBe(8);
     expect(sitrep.marketSignals[0]).toHaveProperty("liquidityScore");
     expect(sitrep.profitability?.companyFit.length).toBeGreaterThan(0);
     expect(sitrep.profitability?.globalTargets.length).toBeGreaterThan(0);
@@ -170,6 +172,54 @@ describe("analysis", () => {
     expect(tools?.outputValuePerHour).toBe(600_000);
     expect(tools?.warnings.join(" ")).toContain("CP fallback");
     expect(tools?.priceConfidence).toBe("low");
+  });
+
+  it("builds a 12-hour operations story from active production", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), context, "openai", "test-model");
+    const income = sitrep.operationsBrief.expectedIncome;
+    const ironBarLine = income.lines.find((line) => line.outputMatName === "Iron Bar");
+    const ironOreBuffer = sitrep.operationsBrief.bufferPlan.materials.find((material) => material.matName === "Iron Ore");
+    const ironBarSurplus = sitrep.operationsBrief.surplusPlans.find((plan) => plan.matName === "Iron Bar");
+
+    expect(income.grossOutputValue).toBe(7_200_000);
+    expect(income.inputCost).toBe(4_800_000);
+    expect(income.netProfit).toBe(2_400_000);
+    expect(ironBarLine?.orderCount).toBe(1);
+    expect(ironBarLine?.confidence).toBe("high");
+    expect(ironOreBuffer?.targetHours).toBe(8);
+    expect(ironOreBuffer?.buyQty).toBe(46.67);
+    expect(ironOreBuffer?.estimatedCost).toBe(186_666.67);
+    expect(ironBarSurplus?.recommendation).toBe("reprice");
+    expect(ironBarSurplus?.surplusQty).toBe(300);
+    expect(sitrep.actionPlans.some((plan) => plan.id === "buffer-1")).toBe(true);
+  });
+
+  it("respects a custom input buffer target", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), { ...context, bufferHours: 24 }, "openai", "test-model");
+    const ironOreBuffer = sitrep.operationsBrief.bufferPlan.materials.find((material) => material.matName === "Iron Ore");
+
+    expect(sitrep.operationsBrief.bufferPlan.targetHours).toBe(24);
+    expect(ironOreBuffer?.buyQty).toBe(180);
+    expect(ironOreBuffer?.estimatedCost).toBe(720_000);
+  });
+
+  it("flags unprofitable active products", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.bases[0].productionOrders = [{ recipeId: 1001 }, { recipeId: 2001 }];
+    (snapshot.gameData.buildings as Record<string, unknown>[])[1].requiredResearch = 0;
+    snapshot.market.prices = [
+      { matId: 1, matName: "Iron Ore", currentPrice: 4000, avgPrice: 5000 },
+      { matId: 2, matName: "Iron Bar", currentPrice: 12000, avgPrice: 9000 },
+      { matId: 3, matName: "Tools", currentPrice: 500, avgPrice: 6000 }
+    ];
+    snapshot.market.details = snapshot.market.prices;
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const problemText = sitrep.operationsBrief.problems.map((problem) => `${problem.type} ${problem.title}`).join(" ");
+
+    expect(problemText).toContain("unprofitable_product");
+    expect(problemText).toContain("Tools");
+    expect(sitrep.actionPlans.some((plan) => plan.id === "review-production-2001")).toBe(true);
   });
 
   it("keeps hard-blocked targets out of main action ranking", () => {

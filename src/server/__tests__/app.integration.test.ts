@@ -71,6 +71,9 @@ describe("API integration", () => {
     expect(body.rawSnapshot.company.name).toBe("Stellar Foundry");
     expect(body.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(body.projections.bands).toHaveLength(4);
+    expect(body.operationsBrief.expectedIncome.netProfit).toBeGreaterThan(0);
+    expect(body.operationsBrief.bufferPlan.targetHours).toBe(8);
+    expect(body.operationsBrief.surplusPlans.length).toBeGreaterThan(0);
     expect(body.decisionPanel.actions.length).toBeGreaterThan(0);
     expect(body.decisionPanel.actions.every((action: { preparedCommands: Array<{ executable: boolean }> }) => action.preparedCommands.every((command) => command.executable === false))).toBe(true);
     expect(body.profitability.companyFit.length).toBeGreaterThan(0);
@@ -306,6 +309,7 @@ describe("API integration", () => {
     expect(body.profitability).toEqual(deterministic.profitability);
     expect(body.expansionCandidates).toHaveLength(deterministic.expansionCandidates.length);
     expect(body.projections).toEqual(deterministic.projections);
+    expect(body.operationsBrief).toEqual(deterministic.operationsBrief);
     expect(body.situation).toBeTruthy();
     expect(body.warnings).toContain("Provider caveat.");
   });

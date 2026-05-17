@@ -93,6 +93,7 @@ export default function App() {
     userPrompt: "Give me a SITREP and the highest-impact actions before my next login.",
     nextLoginAt: "",
     autonomyHours: 12,
+    bufferHours: 8,
     cashRiskLevel: "balanced",
     shortTermGoal: "Keep production running and find profitable market moves",
     notes: ""
@@ -206,6 +207,7 @@ export default function App() {
           planningContext: {
             ...planning,
             autonomyHours: Number(planning.autonomyHours),
+            bufferHours: Number(planning.bufferHours) || 8,
             nextLoginAt: planning.nextLoginAt || undefined,
             userPrompt: planning.userPrompt.trim() || undefined,
             notes: planning.notes || undefined
@@ -422,6 +424,17 @@ export default function App() {
                   />
                 </label>
                 <label>
+                  Input buffer hours
+                  <input
+                    type="number"
+                    min="1"
+                    max="168"
+                    value={planning.bufferHours}
+                    onChange={(event) => setPlanning({ ...planning, bufferHours: Number(event.target.value) })}
+                    required
+                  />
+                </label>
+                <label>
                   Cash risk
                   <select
                     value={planning.cashRiskLevel}
@@ -525,6 +538,7 @@ function DashboardTab({
     userPrompt: string;
     nextLoginAt: string;
     autonomyHours: number;
+    bufferHours: number;
     cashRiskLevel: string;
     shortTermGoal: string;
     notes: string;
@@ -559,24 +573,7 @@ function DashboardTab({
   }
 
   if (tab === "operations") {
-    return (
-      <div className="item-grid">
-        {sitrep.stockoutRisks.map((risk) => (
-          <article className="data-card" key={risk.matId}>
-            <header>
-              <strong>{risk.matName}</strong>
-              <span className={`priority ${risk.severity}`}>{risk.severity}</span>
-            </header>
-            <dl>
-              <div><dt>Available</dt><dd>{risk.availableQty.toLocaleString()}</dd></div>
-              <div><dt>Required</dt><dd>{risk.requiredQty.toLocaleString()}</dd></div>
-              <div><dt>Short</dt><dd>{risk.shortageQty.toLocaleString()}</dd></div>
-            </dl>
-            <p>{risk.affectedBases.join(", ") || "Affected base unavailable"}</p>
-          </article>
-        ))}
-      </div>
-    );
+    return <OperationsTab sitrep={sitrep} />;
   }
 
   if (tab === "profitability") {
@@ -646,9 +643,13 @@ function DashboardTab({
             <span>GT {Math.round(sitrep.diagnostics.timingsMs.snapshot ?? 0)} ms</span>
             <span>LLM {Math.round(sitrep.diagnostics.timingsMs.llm ?? 0)} ms</span>
             <span>Total {Math.round(sitrep.diagnostics.timingsMs.total ?? 0)} ms</span>
+            {sitrep.diagnostics.promptChars !== undefined ? <span>Prompt {sitrep.diagnostics.promptChars.toLocaleString()} chars</span> : null}
+            {sitrep.diagnostics.outputTokenCap !== undefined ? <span>Output cap {sitrep.diagnostics.outputTokenCap.toLocaleString()}</span> : null}
+            {sitrep.diagnostics.payloadProfile ? <span>Payload: {sitrep.diagnostics.payloadProfile}</span> : null}
           </div>
         ) : null}
       </section>
+      <OperationsBriefPanel brief={sitrep.operationsBrief} />
       {sitrep.decisionBrief ? <DecisionBriefPanel brief={sitrep.decisionBrief} /> : null}
       <HistoryTrendPanel sitrep={sitrep} />
       {sitrep.projections ? <TimelinePanel sitrep={sitrep} /> : null}
@@ -700,6 +701,198 @@ function DashboardTab({
           </article>
         ))}
       </div>
+    </div>
+  );
+}
+
+function OperationsBriefPanel({ brief }: { brief: SitrepResponse["operationsBrief"] }) {
+  const topProblem = brief.problems[0];
+  const topSurplus = brief.surplusPlans[0];
+  const urgentBuffers = brief.bufferPlan.materials.filter((material) => material.buyQty > 0);
+  return (
+    <section className="timeline-panel" aria-label="Operations Brief">
+      <div className="timeline-head">
+        <div>
+          <span className="category">Operations brief</span>
+          <h2>Income, bottlenecks, buffer, surplus</h2>
+        </div>
+        <span className={`confidence-chip ${brief.expectedIncome.confidence}`}>{brief.expectedIncome.confidence}</span>
+      </div>
+      <div className="item-grid">
+        <article className="data-card">
+          <header>
+            <strong>12h Net Income</strong>
+            <span className="profit-chip">{moneyDelta(brief.expectedIncome.netProfit)}</span>
+          </header>
+          <dl>
+            <div><dt>Gross</dt><dd>{money(brief.expectedIncome.grossOutputValue)}</dd></div>
+            <div><dt>Inputs</dt><dd>{money(brief.expectedIncome.inputCost)}</dd></div>
+            <div><dt>Lines</dt><dd>{brief.expectedIncome.lines.length}</dd></div>
+          </dl>
+          <p>{brief.expectedIncome.assumptions[0]}</p>
+        </article>
+        <article className="data-card">
+          <header>
+            <strong>Problems</strong>
+            <span className={`priority ${topProblem?.severity ?? "low"}`}>{brief.problems.length}</span>
+          </header>
+          <p>{topProblem ? topProblem.summary : "No production/profitability problem cleared the current filters."}</p>
+          {topProblem?.evidence.length ? <div className="mini-list">{topProblem.evidence.slice(0, 2).map((item) => <span key={item}>{item}</span>)}</div> : null}
+        </article>
+        <article className="data-card">
+          <header>
+            <strong>Buffer Cost</strong>
+            <span className="horizon-chip">{brief.bufferPlan.targetHours}h</span>
+          </header>
+          <dl>
+            <div><dt>Fill cost</dt><dd>{money(brief.bufferPlan.totalFillCost)}</dd></div>
+            <div><dt>Materials</dt><dd>{urgentBuffers.length}</dd></div>
+          </dl>
+          <p>{urgentBuffers[0] ? `${urgentBuffers[0].matName}: ${Math.ceil(urgentBuffers[0].buyQty).toLocaleString()} units to fill.` : "All visible production inputs meet the configured buffer."}</p>
+        </article>
+        <article className="data-card">
+          <header>
+            <strong>Surplus Plan</strong>
+            <span className="tag watch">{brief.surplusPlans.length}</span>
+          </header>
+          <p>{topSurplus ? `${topSurplus.matName}: ${topSurplus.recommendation} ${Math.ceil(topSurplus.surplusQty).toLocaleString()} surplus units.` : "No surplus inventory above buffer and known demand."}</p>
+          {topSurplus?.surplusValue !== undefined ? <p>{money(topSurplus.surplusValue)} visible value.</p> : null}
+        </article>
+      </div>
+    </section>
+  );
+}
+
+function OperationsTab({ sitrep }: { sitrep: SitrepResponse }) {
+  const brief = sitrep.operationsBrief;
+  return (
+    <div className="profitability-stack">
+      <section className="profitability-section">
+        <header>
+          <h3>Input buffer</h3>
+          <span>{brief.bufferPlan.targetHours}h target</span>
+        </header>
+        <div className="item-grid">
+          {brief.bufferPlan.materials.length === 0 ? (
+            <article className="data-card wide">
+              <p>No active production input demand was visible.</p>
+            </article>
+          ) : brief.bufferPlan.materials.map((material) => (
+            <article className="data-card" key={material.matId}>
+              <header>
+                <strong>{material.matName}</strong>
+                <span className={`priority ${material.urgency}`}>{material.urgency}</span>
+              </header>
+              <dl>
+                <div><dt>Coverage</dt><dd>{material.coverageHours !== undefined ? `${material.coverageHours}h` : "n/a"}</dd></div>
+                <div><dt>Owned</dt><dd>{Math.ceil(material.ownedQty).toLocaleString()}</dd></div>
+                <div><dt>Buy</dt><dd>{Math.ceil(material.buyQty).toLocaleString()}</dd></div>
+                <div><dt>Cost</dt><dd>{material.estimatedCost !== undefined ? money(material.estimatedCost) : "n/a"}</dd></div>
+              </dl>
+              <p>{material.affectedBases.join(", ") || "Affected base unavailable"}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="profitability-section">
+        <header>
+          <h3>Production problems</h3>
+          <span>{brief.problems.length} issues</span>
+        </header>
+        <div className="item-grid">
+          {brief.problems.length === 0 ? (
+            <article className="data-card wide">
+              <p>No production bottleneck, unprofitable active line, or low-impact active product cleared the current filters.</p>
+            </article>
+          ) : brief.problems.map((problem) => (
+            <article className="data-card wide" key={problem.id}>
+              <header>
+                <strong>{problem.title}</strong>
+                <span className={`priority ${problem.severity}`}>{problem.severity}</span>
+              </header>
+              <p>{problem.summary}</p>
+              {problem.evidence.length > 0 ? <div className="mini-list">{problem.evidence.slice(0, 4).map((item) => <span key={item}>{item}</span>)}</div> : null}
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="profitability-section">
+        <header>
+          <h3>Active production income</h3>
+          <span>{moneyDelta(brief.expectedIncome.netProfit)} / 12h</span>
+        </header>
+        <div className="item-grid">
+          {brief.expectedIncome.lines.length === 0 ? (
+            <article className="data-card wide">
+              <p>No active production orders were visible.</p>
+            </article>
+          ) : brief.expectedIncome.lines.map((line) => (
+            <article className="data-card wide" key={line.id}>
+              <header>
+                <strong>{line.outputMatName}</strong>
+                <span className={`confidence-chip ${line.confidence}`}>{line.confidence}</span>
+              </header>
+              <dl>
+                <div><dt>Base</dt><dd>{line.baseName}</dd></div>
+                <div><dt>Net</dt><dd>{moneyDelta(line.netProfit)}</dd></div>
+                <div><dt>Gross</dt><dd>{money(line.grossOutputValue)}</dd></div>
+                <div><dt>Inputs</dt><dd>{money(line.inputCost)}</dd></div>
+              </dl>
+              <p>{line.assumptions.join(" ")}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="profitability-section">
+        <header>
+          <h3>Surplus plans</h3>
+          <span>{brief.surplusPlans.length} materials</span>
+        </header>
+        <div className="item-grid">
+          {brief.surplusPlans.length === 0 ? (
+            <article className="data-card wide">
+              <p>No surplus inventory above buffer and known demand.</p>
+            </article>
+          ) : brief.surplusPlans.map((plan) => (
+            <article className="data-card" key={plan.matId}>
+              <header>
+                <strong>{plan.matName}</strong>
+                <span className="tag watch">{plan.recommendation}</span>
+              </header>
+              <dl>
+                <div><dt>Surplus</dt><dd>{Math.ceil(plan.surplusQty).toLocaleString()}</dd></div>
+                <div><dt>Value</dt><dd>{plan.surplusValue !== undefined ? money(plan.surplusValue) : "n/a"}</dd></div>
+                <div><dt>Price</dt><dd>{plan.priceSource}</dd></div>
+              </dl>
+              <p>{plan.reason}</p>
+            </article>
+          ))}
+        </div>
+      </section>
+      {sitrep.stockoutRisks.length > 0 ? (
+        <section className="profitability-section">
+          <header>
+            <h3>Legacy stockout risks</h3>
+            <span>{sitrep.stockoutRisks.length} risks</span>
+          </header>
+          <div className="item-grid">
+            {sitrep.stockoutRisks.map((risk) => (
+              <article className="data-card" key={risk.matId}>
+                <header>
+                  <strong>{risk.matName}</strong>
+                  <span className={`priority ${risk.severity}`}>{risk.severity}</span>
+                </header>
+                <dl>
+                  <div><dt>Available</dt><dd>{risk.availableQty.toLocaleString()}</dd></div>
+                  <div><dt>Required</dt><dd>{risk.requiredQty.toLocaleString()}</dd></div>
+                  <div><dt>Short</dt><dd>{risk.shortageQty.toLocaleString()}</dd></div>
+                </dl>
+                <p>{risk.affectedBases.join(", ") || "Affected base unavailable"}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
@@ -1101,6 +1294,7 @@ function WhatIfPanel({
     userPrompt: string;
     nextLoginAt: string;
     autonomyHours: number;
+    bufferHours: number;
     cashRiskLevel: string;
     shortTermGoal: string;
     notes: string;

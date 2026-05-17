@@ -50,6 +50,7 @@ export class SitrepService {
     const responseWithDiagnostics: SitrepResponse = {
       ...response,
       diagnostics: {
+        ...response.diagnostics,
         source: "llm",
         timingsMs: {
           snapshot: snapshotMs,

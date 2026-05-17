@@ -1,5 +1,83 @@
 import { expect, test } from "@playwright/test";
 
+function mockOperationsBrief() {
+  return {
+    expectedIncome: {
+      horizonHours: 12,
+      grossOutputValue: 7200000,
+      inputCost: 4800000,
+      netProfit: 2400000,
+      confidence: "high",
+      assumptions: [
+        "Forecast assumes visible active production orders keep running for the next 12 hours.",
+        "Prices use current market values first and material CP fallback second."
+      ],
+      lines: [
+        {
+          id: "income-1001-alpha",
+          baseName: "Alpha",
+          recipeId: 1001,
+          recipeName: "Iron Bar recipe",
+          orderCount: 1,
+          outputMatId: 2,
+          outputMatName: "Iron Bar",
+          grossOutputValue: 7200000,
+          inputCost: 4800000,
+          netProfit: 2400000,
+          marginPct: 50,
+          confidence: "high",
+          priceSources: ["Iron Bar: market", "Iron Ore: market"],
+          assumptions: ["1 active production order(s) at Alpha.", "12 recipe cycle(s) projected over 12h."]
+        }
+      ]
+    },
+    problems: [
+      {
+        id: "buffer-1",
+        type: "production_bottleneck",
+        severity: "high",
+        title: "Iron Ore below 8h input buffer",
+        summary: "2h covered; buy 100 units to reach 8h.",
+        evidence: ["20 owned vs 120 target.", "Estimated fill cost $4,000."],
+        actionId: "buffer-1"
+      }
+    ],
+    bufferPlan: {
+      targetHours: 8,
+      totalFillCost: 400000,
+      materials: [
+        {
+          matId: 1,
+          matName: "Iron Ore",
+          targetHours: 8,
+          coverageHours: 2,
+          targetQty: 120,
+          ownedQty: 20,
+          buyQty: 100,
+          estimatedCost: 400000,
+          priceSource: "market",
+          urgency: "high",
+          affectedBases: ["Alpha"]
+        }
+      ],
+      warnings: []
+    },
+    surplusPlans: [
+      {
+        matId: 2,
+        matName: "Iron Bar",
+        surplusQty: 300,
+        surplusValue: 1800000,
+        priceSource: "market",
+        recommendation: "reprice",
+        confidence: "high",
+        reason: "Surplus is already exchange-exposed and the premium is material enough to review repricing.",
+        actionId: "surplus-2"
+      }
+    ]
+  };
+}
+
 test("setup and sitrep dashboard flow", async ({ page }) => {
   await page.route("**/api/session/keys", async (route) => {
     await route.fulfill({ json: { ok: true } });
@@ -29,6 +107,7 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
         provider: "openai",
         model: "gpt-4.1-mini",
         summary: "Restock inputs and review exchange pricing.",
+        operationsBrief: mockOperationsBrief(),
         decisionBrief: {
           thesis: "Restock Iron Ore first, then inspect whether the next CV move should be production capacity or market repricing.",
           recommendedPath: [
@@ -700,10 +779,15 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
 
   await expect(page.getByText("Session active")).toBeVisible();
   await expect(page.getByLabel("Model")).toHaveValue("gpt-4.1-mini");
+  await page.getByText("Planning controls").click();
+  await expect(page.getByLabel("Input buffer hours")).toHaveValue("8");
   await page.getByLabel("Command prompt").fill("Give me a restock-focused sitrep before my next login.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByRole("heading", { name: "Restock Iron Ore", exact: true })).toBeVisible();
   await expect(page.getByText("Restock inputs and review exchange pricing.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Income, bottlenecks, buffer, surplus" })).toBeVisible();
+  await expect(page.getByText("12h Net Income")).toBeVisible();
+  await expect(page.getByText("Buffer Cost")).toBeVisible();
   await expect(page.getByRole("heading", { name: /Restock Iron Ore first/ })).toBeVisible();
   await expect(page.getByText("Recommended path")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Projection roadmap" })).toBeVisible();
@@ -775,6 +859,7 @@ test("full OpenAI model remains selectable", async ({ page }) => {
         provider: "openai",
         model: "gpt-5",
         summary: "Full model was selected explicitly.",
+        operationsBrief: mockOperationsBrief(),
         actionPlans: [],
         marketSignals: [],
         stockoutRisks: [],
@@ -823,6 +908,7 @@ test("CV growth prompt renders decision alternatives and inspection checklist", 
         provider: "openai",
         model: "gpt-4.1-mini",
         summary: "CV growth needs a prepared path, not a blind spend.",
+        operationsBrief: mockOperationsBrief(),
         decisionBrief: {
           thesis: "Increase CV by comparing deeper specialization against diversification before committing cash.",
           recommendedPath: ["1. Hold major spending.", "2. Compare specialization and diversification.", "3. Commit to the better margin path."],
@@ -949,6 +1035,7 @@ test("LLM timeout error remains visible without clearing the dashboard", async (
           provider: "openai",
           model: "gpt-4.1-mini",
           summary: "Fast model generated the current dashboard.",
+          operationsBrief: mockOperationsBrief(),
           actionPlans: [],
           marketSignals: [],
           stockoutRisks: [],
@@ -1001,6 +1088,7 @@ test("model catalog failure keeps fallback models available", async ({ page }) =
         provider: "openai",
         model: "gpt-4.1-mini",
         summary: "Fallback model still generated a sitrep.",
+        operationsBrief: mockOperationsBrief(),
         actionPlans: [],
         marketSignals: [],
         stockoutRisks: [],
@@ -1048,6 +1136,7 @@ test("custom model override is sent with the prompt request", async ({ page }) =
         provider: "openai",
         model: "gpt-experimental-sitrep",
         summary: "Custom model generated a logistics plan.",
+        operationsBrief: mockOperationsBrief(),
         actionPlans: [],
         marketSignals: [],
         stockoutRisks: [],
@@ -1097,6 +1186,7 @@ test("gemini provider dashboard renders deterministic tabs after synthesis", asy
         provider: "gemini",
         model: "gemini-2.5-flash",
         summary: "Gemini synthesized the plan while preserving deterministic tables.",
+        operationsBrief: mockOperationsBrief(),
         actionPlans: [],
         marketSignals: [
           {

@@ -6,6 +6,7 @@ import type {
   LogisticsMove,
   MarketSignal,
   MaterialAmount,
+  OperationsBrief,
   PlayerPlanningContext,
   ProjectedMaterialNeed,
   PreparedCommand,
@@ -16,6 +17,7 @@ import type {
   StockoutRisk
 } from "../../shared/schemas.js";
 import type { NormalizedSnapshot } from "./normalizers.js";
+import { surplusActionThreshold } from "./operationsBrief.js";
 import { addProjectionTiming, buildProjectionBase, buildProjections, earliestNeedForMaterial, projectionNeedScore } from "./projections.js";
 import { clamp, confidenceFromScore, formatMoney, formatPct, numberValue, priorityFromScore, round, severityScore, text } from "./utils.js";
 
@@ -37,6 +39,7 @@ export function buildStrategy(
   stockoutRisks: StockoutRisk[],
   logisticsMoves: LogisticsMove[],
   profitability: ProfitabilitySet,
+  operationsBrief: OperationsBrief,
   context: PlayerPlanningContext
 ): StrategyResult {
   const intent = classifyPlanningIntent(context);
@@ -44,7 +47,7 @@ export function buildStrategy(
   const situation = computeSituation(normalized, marketSignals, stockoutRisks, logisticsMoves, expansionCandidates, profitability);
   const projectionBase = buildProjectionBase(normalized, context);
   const actionPlans = addProjectionTiming(
-    buildActionPlans(normalized, marketSignals, stockoutRisks, logisticsMoves, expansionCandidates, profitability, context, intent, projectionBase),
+    buildActionPlans(normalized, marketSignals, stockoutRisks, logisticsMoves, expansionCandidates, profitability, operationsBrief, context, intent, projectionBase),
     projectionBase
   );
   const projections = buildProjections(normalized, actionPlans, context);
@@ -73,6 +76,7 @@ function buildActionPlans(
   logisticsMoves: LogisticsMove[],
   expansionCandidates: ExpansionCandidate[],
   profitability: ProfitabilitySet,
+  operationsBrief: OperationsBrief,
   context: PlayerPlanningContext,
   intent: PlanningIntent,
   projectionBase: Pick<ProjectionSet, "horizons" | "materialNeeds">
@@ -135,9 +139,11 @@ function buildActionPlans(
     }, score, breakdown));
   }
 
+  addOperationsBriefPlans(plans, operationsBrief, normalized, context, intent);
+
   for (const signal of marketSignals.slice(0, 12)) {
     if (signal.recommendation === "buy" && !shouldCreateBuyAction(signal, context)) continue;
-    if (signal.recommendation === "sell" && (signal.ownedQty ?? 0) <= 0) continue;
+    if (signal.recommendation === "sell" && ((signal.ownedQty ?? 0) <= 0 || !isMeaningfulSellSignal(signal, normalized.cash))) continue;
     if (signal.recommendation !== "buy" && signal.recommendation !== "sell") continue;
 
     const cashImpactPct = signal.cashImpactPct ?? 0;
@@ -214,6 +220,108 @@ function buildActionPlans(
   addProjectedRestockPlans(plans, normalized, marketSignals, stockoutRisks, context, intent, projectionBase);
 
   return plans.sort((a, b) => (b.score ?? 0) - (a.score ?? 0)).slice(0, 16);
+}
+
+function addOperationsBriefPlans(
+  plans: ActionPlan[],
+  operationsBrief: OperationsBrief,
+  normalized: NormalizedSnapshot,
+  context: PlayerPlanningContext,
+  intent: PlanningIntent
+): void {
+  for (const material of operationsBrief.bufferPlan.materials.filter((item) => item.buyQty > 0).slice(0, 5)) {
+    const cashImpactPct = normalized.cash > 0 && material.estimatedCost !== undefined ? (material.estimatedCost / normalized.cash) * 100 : 0;
+    const urgency = material.urgency === "critical" ? 96 : material.urgency === "high" ? 84 : material.urgency === "medium" ? 68 : 35;
+    const breakdown = {
+      urgency,
+      companyFit: 100,
+      profitPotential: 20,
+      marketConfidence: material.priceSource === "market" ? 72 : material.priceSource === "cp" ? 50 : 25,
+      feasibility: scoreCashFeasibility(cashImpactPct, context.cashRiskLevel),
+      goalAlignment: scoreGoalAlignment(context, intent, material.matName, "restock")
+    };
+    const score = weightedScore(breakdown);
+    plans.push(withScore({
+      id: `buffer-${material.matId}`,
+      title: `Fill ${material.matName} input buffer to ${operationsBrief.bufferPlan.targetHours}h`,
+      priority: priorityFromScore(score),
+      category: "operations",
+      expectedBenefit: `Raises active-production input coverage to the configured ${operationsBrief.bufferPlan.targetHours}h buffer.`,
+      costSummary: `${Math.ceil(material.buyQty).toLocaleString()} units to buy${material.estimatedCost !== undefined ? `, about ${formatMoney(material.estimatedCost)}` : ""}.`,
+      risk: material.priceSource === "missing" ? "No reliable market or CP price was available; verify cost manually before buying." : "Live exchange depth can change before the buffer is filled.",
+      evidence: [
+        `${material.coverageHours ?? 0}h covered vs ${operationsBrief.bufferPlan.targetHours}h target.`,
+        `${Math.ceil(material.ownedQty).toLocaleString()} owned vs ${Math.ceil(material.targetQty).toLocaleString()} target.`,
+        ...material.affectedBases
+      ],
+      whyNow: `${material.matName} is below the configured production input buffer, so this protects output before speculative market moves.`,
+      bestWhen: "Use this when the production queue still matches the snapshot and cash remains inside your risk setting.",
+      avoidIf: "Avoid overfilling if production orders changed, the material was already delivered, or live prices moved sharply.",
+      whatWouldChangeThis: "A fresh warehouse snapshot or production-order change can reduce the required buy quantity.",
+      preparedCommands: [buyCommand(`Fill ${material.matName} buffer`, material.matId, Math.ceil(material.buyQty), material.matName)]
+    }, score, breakdown));
+  }
+
+  for (const problem of operationsBrief.problems.filter((item) => item.type === "unprofitable_product" || item.type === "less_profitable_product").slice(0, 4)) {
+    const breakdown = {
+      urgency: problem.type === "unprofitable_product" ? 78 : 52,
+      companyFit: 96,
+      profitPotential: problem.type === "unprofitable_product" ? 72 : 45,
+      marketConfidence: problem.severity === "high" ? 70 : 55,
+      feasibility: 80,
+      goalAlignment: scoreGoalAlignment(context, intent, problem.title, "profitability")
+    };
+    const score = weightedScore(breakdown);
+    plans.push(withScore({
+      id: problem.actionId ?? `review-${problem.id}`,
+      title: problem.type === "unprofitable_product" ? `Review unprofitable ${problem.title.replace(/ is unprofitable.*$/, "")}` : `Review low-impact ${problem.title.replace(/ is a low-impact.*$/, "")}`,
+      priority: priorityFromScore(score),
+      category: "profitability",
+      expectedBenefit: "Stops active production capacity from being tied up in weak or negative-value output.",
+      costSummary: "No direct buy cost; requires live production and price review.",
+      risk: "Switching production without checking input/output depth can reduce throughput or strand inventory.",
+      evidence: problem.evidence,
+      whyNow: problem.summary,
+      bestWhen: "Use this when a live price refresh confirms the 12h net-profit problem.",
+      avoidIf: "Avoid switching if the output is needed for contracts, downstream recipes, or a planned base requirement.",
+      whatWouldChangeThis: "Improved sell price, cheaper inputs, or new downstream demand can restore the product.",
+      preparedCommands: [reviewCommand(problem.title, { problemId: problem.id, type: problem.type })]
+    }, score, breakdown));
+  }
+
+  for (const surplus of operationsBrief.surplusPlans.filter((item) => item.actionId && (item.recommendation === "sell" || item.recommendation === "reprice")).slice(0, 4)) {
+    const valuePct = normalized.cash > 0 && surplus.surplusValue !== undefined ? (surplus.surplusValue / normalized.cash) * 100 : 0;
+    const breakdown = {
+      urgency: 34,
+      companyFit: 82,
+      profitPotential: clamp(valuePct * 18),
+      marketConfidence: surplus.confidence === "high" ? 82 : surplus.confidence === "medium" ? 58 : 30,
+      feasibility: 78,
+      goalAlignment: scoreGoalAlignment(context, intent, surplus.matName, "sell")
+    };
+    const score = Math.min(weightedScore(breakdown), 72);
+    plans.push(withScore({
+      id: surplus.actionId ?? `surplus-${surplus.matId}`,
+      title: `${surplus.recommendation === "reprice" ? "Reprice" : "Plan sale for"} surplus ${surplus.matName}`,
+      priority: priorityFromScore(score),
+      category: "market",
+      expectedBenefit: `Turns inventory above the configured buffer and known demand into cash${surplus.surplusValue !== undefined ? ` worth about ${formatMoney(surplus.surplusValue)}` : ""}.`,
+      costSummary: `${Math.ceil(surplus.surplusQty).toLocaleString()} surplus units above protected demand.`,
+      risk: "Selling surplus too early can starve future production if the buffer assumptions are stale.",
+      evidence: [surplus.reason],
+      whyNow: `${surplus.matName} is surplus after protecting known demand and the configured buffer.`,
+      bestWhen: "Use this when live sell depth is still strong and no near-term recipe needs the surplus.",
+      avoidIf: "Avoid if a contract, base plan, or new production order consumes this material.",
+      whatWouldChangeThis: "A higher buffer target, new wishlist, or production switch can reclassify surplus as protected stock.",
+      preparedCommands: [{
+        type: "adjust_sell_offer",
+        title: `Review surplus ${surplus.matName}`,
+        executable: false,
+        payload: { matId: surplus.matId, surplusQty: surplus.surplusQty, surplusValue: surplus.surplusValue },
+        steps: [`Open ${surplus.matName} inventory and exchange depth.`, "Confirm the surplus quantity remains above buffer and known demand.", "List or reprice only the confirmed surplus quantity."]
+      }]
+    }, score, breakdown));
+  }
 }
 
 function addProfitabilityPlans(
@@ -919,6 +1027,13 @@ function shouldCreateBuyAction(signal: MarketSignal, context: PlayerPlanningCont
   if ((signal.netNeedQty ?? 0) > 0) return true;
   if ((signal.recipeMarginPct ?? 0) >= 25 && (context.cashRiskLevel === "aggressive" || prompt.includes(signal.matName.toLowerCase()))) return true;
   return false;
+}
+
+function isMeaningfulSellSignal(signal: MarketSignal, cash: number): boolean {
+  const threshold = surplusActionThreshold(cash);
+  const spreadValue = signal.spreadValue ?? 0;
+  if (spreadValue < threshold) return false;
+  return (signal.materialityPct ?? 0) >= 1 || (signal.grossCashImpactPct ?? 0) >= 3;
 }
 
 function buyCommand(title: string, matId: number, quantity: number, matName: string): PreparedCommand {

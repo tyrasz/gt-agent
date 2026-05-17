@@ -7,6 +7,7 @@ import type {
   GameSnapshot,
   LogisticsMove,
   MarketSignal,
+  OperationsBrief,
   PlayerPlanningContext,
   ProfitabilitySet,
   Provider,
@@ -19,6 +20,7 @@ import { computeLogisticsMoves } from "./analysis/logistics.js";
 import { computeMarketSignals } from "./analysis/market.js";
 import { computeDecisionPanel } from "./analysis/decisions.js";
 import { normalizeSnapshot } from "./analysis/normalizers.js";
+import { computeOperationsBrief } from "./analysis/operationsBrief.js";
 import { computeProfitability } from "./analysis/profitability.js";
 import { buildStrategy } from "./analysis/strategy.js";
 
@@ -28,6 +30,7 @@ type AnalysisResult = {
   expansionCandidates: ExpansionCandidate[];
   logisticsMoves: LogisticsMove[];
   profitability: ProfitabilitySet;
+  operationsBrief: OperationsBrief;
   decisionPanel: DecisionPanel;
   actionPlans: ActionPlan[];
   situation: CompanySituation;
@@ -41,9 +44,10 @@ export function analyzeSnapshot(snapshot: GameSnapshot, context: PlayerPlanningC
   const normalized = normalizeSnapshot(snapshot, context);
   const profitability = computeProfitability(snapshot, normalized, context);
   const marketSignals = computeMarketSignals(snapshot, normalized, context, profitability);
+  const operationsBrief = computeOperationsBrief(snapshot, normalized, profitability, marketSignals, context);
   const stockoutRisks = computeStockoutRisks(normalized, context);
   const logisticsMoves = computeLogisticsMoves(normalized, stockoutRisks);
-  const strategy = buildStrategy(normalized, marketSignals, stockoutRisks, logisticsMoves, profitability, context);
+  const strategy = buildStrategy(normalized, marketSignals, stockoutRisks, logisticsMoves, profitability, operationsBrief, context);
   const decisionPanel = computeDecisionPanel(snapshot, normalized, marketSignals, strategy.actionPlans, context);
 
   return {
@@ -51,6 +55,7 @@ export function analyzeSnapshot(snapshot: GameSnapshot, context: PlayerPlanningC
     stockoutRisks,
     logisticsMoves,
     profitability,
+    operationsBrief,
     decisionPanel,
     expansionCandidates: strategy.expansionCandidates,
     actionPlans: strategy.actionPlans,
@@ -78,6 +83,7 @@ export function buildDeterministicSitrep(
     decisionBrief: analysis.decisionBrief,
     decisionPanel: analysis.decisionPanel,
     projections: analysis.projections,
+    operationsBrief: analysis.operationsBrief,
     actionPlans: analysis.actionPlans,
     profitability: analysis.profitability,
     chainOpportunities: analysis.profitability.chainOpportunities,

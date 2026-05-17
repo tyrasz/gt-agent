@@ -51,6 +51,7 @@ export const playerPlanningContextSchema = z.object({
   nextLoginAt: z.string().trim().optional(),
   autonomyHours: z.number().min(1).max(168),
   projectionHours: z.array(z.number().min(1).max(168)).min(1).max(6).optional(),
+  bufferHours: z.number().min(1).max(168).optional(),
   cashRiskLevel: cashRiskLevelSchema,
   shortTermGoal: z.string().trim().min(2).max(240),
   userPrompt: z.string().trim().max(2000).optional(),
@@ -318,6 +319,86 @@ export const stockoutRiskSchema = z.object({
   affectedBases: z.array(z.string())
 });
 export type StockoutRisk = z.infer<typeof stockoutRiskSchema>;
+
+export const operationsIncomeLineSchema = z.object({
+  id: z.string(),
+  baseName: z.string(),
+  recipeId: z.number(),
+  recipeName: z.string(),
+  orderCount: z.number(),
+  outputMatId: z.number(),
+  outputMatName: z.string(),
+  grossOutputValue: z.number(),
+  inputCost: z.number(),
+  workerConsumableCost: z.number().optional(),
+  netProfit: z.number(),
+  marginPct: z.number().optional(),
+  confidence: z.enum(["low", "medium", "high"]),
+  priceSources: z.array(z.string()).default([]),
+  assumptions: z.array(z.string()).default([])
+});
+export type OperationsIncomeLine = z.infer<typeof operationsIncomeLineSchema>;
+
+export const operationsProblemSchema = z.object({
+  id: z.string(),
+  type: z.enum(["production_bottleneck", "unprofitable_product", "less_profitable_product", "warehouse_capacity", "data_quality"]),
+  severity: z.enum(["low", "medium", "high", "critical"]),
+  title: z.string(),
+  summary: z.string(),
+  evidence: z.array(z.string()).default([]),
+  actionId: z.string().optional()
+});
+export type OperationsProblem = z.infer<typeof operationsProblemSchema>;
+
+export const bufferMaterialSchema = z.object({
+  matId: z.number(),
+  matName: z.string(),
+  targetHours: z.number(),
+  coverageHours: z.number().optional(),
+  targetQty: z.number(),
+  ownedQty: z.number(),
+  buyQty: z.number(),
+  estimatedCost: z.number().optional(),
+  priceSource: z.enum(["market", "cp", "missing"]),
+  urgency: z.enum(["low", "medium", "high", "critical"]),
+  affectedBases: z.array(z.string()).default([])
+});
+export type BufferMaterial = z.infer<typeof bufferMaterialSchema>;
+
+export const surplusPlanSchema = z.object({
+  matId: z.number(),
+  matName: z.string(),
+  surplusQty: z.number(),
+  surplusValue: z.number().optional(),
+  priceSource: z.enum(["market", "cp", "missing"]),
+  recommendation: z.enum(["sell", "reprice", "feed_recipe", "move", "hold"]),
+  confidence: z.enum(["low", "medium", "high"]),
+  reason: z.string(),
+  actionId: z.string().optional()
+});
+export type SurplusPlan = z.infer<typeof surplusPlanSchema>;
+
+export const operationsBriefSchema = z.object({
+  expectedIncome: z.object({
+    horizonHours: z.number(),
+    grossOutputValue: z.number(),
+    inputCost: z.number(),
+    workerConsumableCost: z.number().optional(),
+    netProfit: z.number(),
+    confidence: z.enum(["low", "medium", "high"]),
+    assumptions: z.array(z.string()).default([]),
+    lines: z.array(operationsIncomeLineSchema).default([])
+  }),
+  problems: z.array(operationsProblemSchema).default([]),
+  bufferPlan: z.object({
+    targetHours: z.number(),
+    totalFillCost: z.number(),
+    materials: z.array(bufferMaterialSchema).default([]),
+    warnings: z.array(z.string()).default([])
+  }),
+  surplusPlans: z.array(surplusPlanSchema).default([])
+});
+export type OperationsBrief = z.infer<typeof operationsBriefSchema>;
 
 export const logisticsMoveSchema = z.object({
   from: z.string(),
@@ -630,6 +711,7 @@ export const sitrepResponseSchema = z.object({
   decisionBrief: decisionBriefSchema,
   decisionPanel: decisionPanelSchema,
   projections: projectionSetSchema,
+  operationsBrief: operationsBriefSchema,
   actionPlans: z.array(actionPlanSchema),
   profitability: profitabilitySetSchema.optional(),
   history: historySummarySchema.optional(),
@@ -644,7 +726,12 @@ export const sitrepResponseSchema = z.object({
   diagnostics: z.object({
     source: z.enum(["llm", "deterministic"]),
     timingsMs: z.record(z.number()),
-    llmMessage: z.string().optional()
+    llmMessage: z.string().optional(),
+    promptChars: z.number().optional(),
+    requestBytes: z.number().optional(),
+    outputTokenCap: z.number().optional(),
+    roughInputTokens: z.number().optional(),
+    payloadProfile: z.string().optional()
   }).optional(),
   rawSnapshot: gameSnapshotSchema.optional()
 });
