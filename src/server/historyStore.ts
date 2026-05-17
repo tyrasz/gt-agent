@@ -37,7 +37,8 @@ function sanitizeSitrep(sitrep: SitrepResponse): SnapshotHistoryEntry {
   const topActionIds = sitrep.actionPlans.slice(0, 4).map((plan) => plan.id);
   const profitableRecipes = [
     ...(sitrep.profitability?.companyFit ?? []),
-    ...(sitrep.profitability?.globalTargets ?? [])
+    ...(sitrep.profitability?.nextSteps ?? []),
+    ...(sitrep.profitability?.aspirationalTargets ?? [])
   ];
   const chains = sitrep.profitability?.chainOpportunities ?? sitrep.chainOpportunities ?? [];
   const actionableMarketSignals = sitrep.marketSignals

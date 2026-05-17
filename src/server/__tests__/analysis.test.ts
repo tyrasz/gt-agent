@@ -36,6 +36,103 @@ describe("analysis", () => {
     expect(result.actionPlans[0]?.preparedCommands.every((command) => command.executable === false)).toBe(true);
   });
 
+  it("ranks fulfillable contract decisions above blocked contract work", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.contracts = [
+      {
+        id: "ore-rush",
+        title: "Iron Ore Rush",
+        reward: 1_000_000,
+        materials: [{ id: 1, qty: 10 }],
+        deadline: "2030-01-01T00:00:00.000Z",
+        status: "active"
+      },
+      {
+        id: "bar-sink",
+        title: "Iron Bar Sink",
+        payout: 1_000,
+        requirements: [{ id: 2, qty: 5_000 }],
+        status: "active"
+      }
+    ];
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const top = sitrep.decisionPanel.actions[0];
+    const blocked = sitrep.decisionPanel.actions.find((action) => action.id === "contract-bar-sink");
+
+    expect(top).toMatchObject({
+      kind: "contract",
+      action: "fulfill_contract",
+      title: "Fulfill Iron Ore Rush",
+      expectedValue: 1_000_000
+    });
+    expect(blocked?.action).toBe("skip_contract");
+    expect(blocked?.blockers.join(" ")).toContain("Visible payout does not cover");
+    expect(sitrep.decisionPanel.actions.every((action) => action.preparedCommands.every((command) => command.executable === false))).toBe(true);
+  });
+
+  it("keeps incomplete contract payloads as low-confidence review decisions", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.contracts = [{ id: "mystery", title: "Mystery Contract", status: "active" }];
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const contract = sitrep.decisionPanel.actions.find((action) => action.id === "contract-mystery");
+
+    expect(contract?.action).toBe("review_contract");
+    expect(contract?.confidence).toBe("low");
+    expect(contract?.blockers.join(" ")).toContain("material requirements");
+    expect(contract?.blockers.join(" ")).toContain("cash payout");
+  });
+
+  it("uses visible market shortage cost and cash-risk gates for contract staging", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.contracts = [
+      {
+        id: "huge-ore",
+        title: "Huge Ore Contract",
+        reward: 100_000_000,
+        materials: [{ id: 1, qty: 10_000 }],
+        status: "active"
+      }
+    ];
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const contract = sitrep.decisionPanel.actions.find((action) => action.id === "contract-huge-ore");
+
+    expect(contract?.action).toBe("prepare_contract");
+    expect(contract?.requirements[0]?.estimatedCost).toBe(39_920_000);
+    expect(contract?.cashImpactPct ?? 0).toBeGreaterThan(25);
+    expect(contract?.blockers.join(" ")).toContain("cash-risk gate");
+  });
+
+  it("promotes actionable exchange buys and reprices without promoting watch-only materials", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.gameData.materials = [
+      ...(snapshot.gameData.materials as Record<string, unknown>[]),
+      { id: 30, name: "Copper Dust", weight: 1, cp: 300 }
+    ];
+    snapshot.market.prices.push({ matId: 30, matName: "Copper Dust", currentPrice: 100, avgPrice: 500 });
+    snapshot.market.details.push({
+      matId: 30,
+      matName: "Copper Dust",
+      currentPrice: 100,
+      avgPrice: 500,
+      totalQtyAvailable: 50_000,
+      avgQtySoldDaily: 5_000,
+      priceHistory: [
+        { avgPrice: 100, qtySold: 5_000 },
+        { avgPrice: 500, qtySold: 4_000 }
+      ]
+    });
+
+    const sitrep = buildDeterministicSitrep(snapshot, context, "openai", "test-model");
+    const exchangeActions = sitrep.decisionPanel.actions.filter((action) => action.kind === "exchange");
+
+    expect(exchangeActions.some((action) => action.action === "buy_material" && action.title === "Buy Iron Ore")).toBe(true);
+    expect(exchangeActions.some((action) => action.action === "adjust_sell_offer" && action.title === "Reprice Iron Bar")).toBe(true);
+    expect(exchangeActions.some((action) => action.title.includes("Copper Dust"))).toBe(false);
+  });
+
   it("builds a complete deterministic sitrep with a raw snapshot", () => {
     const sitrep = buildDeterministicSitrep(makeSnapshot(), context, "openai", "test-model");
 
@@ -46,6 +143,7 @@ describe("analysis", () => {
     expect(sitrep.situation?.production.summary).toContain("material risks");
     expect(sitrep.decisionBrief.thesis).toContain("Stellar Foundry");
     expect(sitrep.decisionBrief.recommendedPath.length).toBeGreaterThan(0);
+    expect(sitrep.decisionPanel.actions.length).toBeGreaterThan(0);
     expect(sitrep.projections.horizons.map((horizon) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(sitrep.marketSignals[0]).toHaveProperty("liquidityScore");
     expect(sitrep.profitability?.companyFit.length).toBeGreaterThan(0);
@@ -74,23 +172,27 @@ describe("analysis", () => {
     expect(tools?.priceConfidence).toBe("low");
   });
 
-  it("keeps company-fit profit opportunities ahead of global restructure targets", () => {
+  it("keeps hard-blocked targets out of main action ranking", () => {
     const sitrep = buildDeterministicSitrep({
       ...makeSnapshot(),
       wishlists: []
     }, { ...context, userPrompt: "How do I increase CV through profit?" }, "openai", "test-model");
 
     expect(sitrep.profitability?.companyFit[0]?.title).toContain("Iron Bar");
-    expect(sitrep.profitability?.globalTargets[0]?.title).toContain("Tools");
+    expect(sitrep.profitability?.blockedTargets[0]?.title).toContain("Tools");
+    expect(sitrep.profitability?.blockedTargets[0]?.techRequirement).toContain("research level 4");
     const companyPlanIndex = sitrep.actionPlans.findIndex((plan) => plan.title.includes("Iron Bar") && plan.category === "profitability");
-    const globalPlanIndex = sitrep.actionPlans.findIndex((plan) => plan.title.includes("Tools") && plan.category === "profitability");
+    const blockedPlanIndex = sitrep.actionPlans.findIndex((plan) => plan.title.includes("Tools") && plan.category === "profitability");
     expect(companyPlanIndex).toBeGreaterThanOrEqual(0);
-    expect(globalPlanIndex).toBeGreaterThanOrEqual(0);
-    expect(companyPlanIndex).toBeLessThan(globalPlanIndex);
+    expect(blockedPlanIndex).toBe(-1);
   });
 
-  it("ranks linked production chains and creates chain action plans", () => {
-    const sitrep = buildDeterministicSitrep(makeSnapshot(), {
+  it("ranks linked production chains and creates chain action plans when the first step is affordable", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    snapshot.company.cash = 10_000_000;
+    const toolworks = (snapshot.gameData.buildings as Record<string, unknown>[]).find((building) => building.id === 20);
+    if (toolworks) toolworks.requiredResearch = 0;
+    const sitrep = buildDeterministicSitrep(snapshot, {
       ...context,
       userPrompt: "Increase CV by optimizing production chains."
     }, "openai", "test-model");
@@ -100,9 +202,62 @@ describe("analysis", () => {
 
     expect(chain).toBeTruthy();
     expect(chain?.steps.map((step) => step.outputMatName)).toEqual(["Iron Bar", "Tools"]);
+    expect(chain?.capitalFit).toBe("affordable");
     expect(opportunity?.profitPerHour).toBeGreaterThan(0);
     expect(plan?.category).toBe("profitability");
     expect(plan?.profitabilityTag).toMatch(/chain/);
+  });
+
+  it("puts inaccessible ore targets in blocked long-term references for a $1.3m company", () => {
+    const sitrep = buildDeterministicSitrep(makeCompanyPathSnapshot(), {
+      ...context,
+      userPrompt: "Give me a 3 day and 7 day path to grow CV from current capital."
+    }, "openai", "test-model");
+    const nextStepTitles = sitrep.profitability?.nextSteps.map((item) => item.title).join(" ") ?? "";
+    const blockedTitles = sitrep.profitability?.blockedTargets.map((item) => item.title).join(" ") ?? "";
+    const actionTitles = sitrep.actionPlans.map((plan) => plan.title).join(" ");
+    const timelineActionIds = sitrep.projections.bands.flatMap((band) => band.actionIds).join(" ");
+    const uranium = sitrep.profitability?.blockedTargets.find((item) => item.title.includes("Uranium Ore"));
+    const aeridium = sitrep.profitability?.blockedTargets.find((item) => item.title.includes("Aeridium Ore"));
+
+    expect(nextStepTitles).toContain("Bridge Widgets");
+    expect(blockedTitles).toMatch(/Uranium Ore|Aeridium Ore/);
+    expect(uranium?.capitalFit).toBe("blocked");
+    expect(uranium?.resourceAccess).toBe("blocked");
+    expect(uranium?.knownMinimumCapital).toBeGreaterThan(0);
+    expect((uranium?.unpricedRequirements ?? []).join(" ")).toMatch(/planet\/base\/resource|Research path/);
+    expect(aeridium?.knownCapitalGap ?? 0).toBeGreaterThan(0);
+    expect(actionTitles).toContain("Bridge Widgets");
+    expect(actionTitles).not.toMatch(/Uranium Ore|Aeridium Ore/);
+    expect(timelineActionIds).not.toMatch(/9001|9002/);
+    expect(sitrep.decisionBrief.recommendedPath.join(" ")).toContain("Bridge Widgets");
+    expect(sitrep.decisionBrief.whyThisPath.join(" ")).toMatch(/excluded from action ranking/i);
+  });
+
+  it("keeps active resource extraction recipes company-fit when access is visible", () => {
+    const snapshot = makeCompanyPathSnapshot();
+    snapshot.bases[0].productionOrders = [{ recipeId: 9001 }];
+    const sitrep = buildDeterministicSitrep(snapshot, {
+      ...context,
+      userPrompt: "Review current ore production profitability."
+    }, "openai", "test-model");
+    const uraniumRecipe = sitrep.profitability?.recipes.find((item) => item.outputMatName === "Uranium Ore");
+
+    expect(uraniumRecipe?.companyFit).toBe("active");
+    expect(uraniumRecipe?.resourceAccess).toBe("owned");
+    expect(sitrep.profitability?.companyFit.some((item) => item.title.includes("Uranium Ore"))).toBe(true);
+    expect(sitrep.profitability?.blockedTargets.some((item) => item.title.includes("Uranium Ore"))).toBe(false);
+  });
+
+  it("uses cash-risk gates to promote only affordable progression moves", () => {
+    const snapshot = makeCompanyPathSnapshot();
+    const balanced = buildDeterministicSitrep(snapshot, { ...context, cashRiskLevel: "balanced", userPrompt: "Find profit growth next steps." }, "openai", "test-model");
+    const aggressive = buildDeterministicSitrep(snapshot, { ...context, cashRiskLevel: "aggressive", userPrompt: "Find profit growth next steps." }, "openai", "test-model");
+
+    expect(balanced.profitability?.nextSteps.some((item) => item.title.includes("Quantum Frames"))).toBe(false);
+    expect(balanced.profitability?.aspirationalTargets.some((item) => item.title.includes("Quantum Frames"))).toBe(true);
+    expect(aggressive.profitability?.nextSteps.some((item) => item.title.includes("Quantum Frames"))).toBe(true);
+    expect(aggressive.profitability?.aspirationalTargets.some((item) => item.title.includes("Quantum Frames"))).toBe(false);
   });
 
   it("stores only sanitized session history and detects repeated strategy signals", () => {
@@ -212,7 +367,7 @@ describe("analysis", () => {
     expect(sitrep.decisionBrief.thesis).toMatch(/CV|value/i);
     expect(sitrep.decisionBrief.recommendedPath.join(" ")).toMatch(/specialization|diversification|diversify/i);
     expect(sitrep.decisionBrief.alternatives.map((item) => item.title).join(" ")).toMatch(/Deepen .*Iron Bar/);
-    expect(sitrep.decisionBrief.alternatives.map((item) => item.title).join(" ")).toMatch(/Diversify .*Tools/);
+    expect(sitrep.decisionBrief.alternatives.map((item) => item.title).join(" ")).toMatch(/blocked reference .*Tools/i);
     expect(sitrep.decisionBrief.inspectNext.join(" ")).toContain("CV growth");
     expect(sitrep.actionPlans[0]?.bestWhen).toBeTruthy();
     expect(sitrep.actionPlans[0]?.avoidIf).toBeTruthy();
@@ -336,4 +491,140 @@ describe("analysis", () => {
 
 function cloneSnapshot(snapshot: GameSnapshot): GameSnapshot {
   return JSON.parse(JSON.stringify(snapshot)) as GameSnapshot;
+}
+
+function makeCompanyPathSnapshot(): GameSnapshot {
+  const snapshot = cloneSnapshot(makeSnapshot());
+  snapshot.company.cash = 130_000_000;
+  snapshot.wishlists = [];
+  snapshot.gameData.materials = [
+    ...(snapshot.gameData.materials as Record<string, unknown>[]),
+    { id: 4, name: "Bridge Widgets", weight: 1, cp: 20_000 },
+    { id: 5, name: "Quantum Frames", weight: 1, cp: 90_000 },
+    { id: 6, name: "Uranium Ore", weight: 4, cp: 8_000_000 },
+    { id: 7, name: "Aeridium Ore", weight: 4, cp: 7_000_000 }
+  ];
+  snapshot.market.prices.push(
+    { matId: 4, matName: "Bridge Widgets", currentPrice: 30_000, avgPrice: 25_000 },
+    { matId: 5, matName: "Quantum Frames", currentPrice: 300_000, avgPrice: 250_000 },
+    { matId: 6, matName: "Uranium Ore", currentPrice: 12_000_000, avgPrice: 10_000_000 },
+    { matId: 7, matName: "Aeridium Ore", currentPrice: 10_000_000, avgPrice: 9_000_000 }
+  );
+  snapshot.market.details.push(
+    {
+      matId: 4,
+      matName: "Bridge Widgets",
+      currentPrice: 30_000,
+      avgPrice: 25_000,
+      totalQtyAvailable: 6_000,
+      avgQtySoldDaily: 900,
+      priceHistory: [{ avgPrice: 30_000, qtySold: 900 }, { avgPrice: 25_000, qtySold: 700 }]
+    },
+    {
+      matId: 5,
+      matName: "Quantum Frames",
+      currentPrice: 300_000,
+      avgPrice: 250_000,
+      totalQtyAvailable: 3_000,
+      avgQtySoldDaily: 750,
+      priceHistory: [{ avgPrice: 300_000, qtySold: 750 }, { avgPrice: 250_000, qtySold: 650 }]
+    },
+    {
+      matId: 6,
+      matName: "Uranium Ore",
+      currentPrice: 12_000_000,
+      avgPrice: 10_000_000,
+      totalQtyAvailable: 2_000,
+      avgQtySoldDaily: 600,
+      priceHistory: [{ avgPrice: 12_000_000, qtySold: 600 }, { avgPrice: 10_000_000, qtySold: 500 }]
+    },
+    {
+      matId: 7,
+      matName: "Aeridium Ore",
+      currentPrice: 10_000_000,
+      avgPrice: 9_000_000,
+      totalQtyAvailable: 2_000,
+      avgQtySoldDaily: 600,
+      priceHistory: [{ avgPrice: 10_000_000, qtySold: 600 }, { avgPrice: 9_000_000, qtySold: 500 }]
+    }
+  );
+  snapshot.gameData.recipes = [
+    ...(snapshot.gameData.recipes as Record<string, unknown>[]),
+    {
+      id: 3001,
+      producedIn: 30,
+      timeMinutes: 60,
+      inputs: [{ id: 2, am: 10 }],
+      output: { id: 4, am: 10 }
+    },
+    {
+      id: 4001,
+      producedIn: 40,
+      timeMinutes: 60,
+      inputs: [{ id: 4, am: 10 }],
+      output: { id: 5, am: 10 }
+    },
+    {
+      id: 9001,
+      producedIn: 90,
+      timeMinutes: 60,
+      inputs: [],
+      output: { id: 6, am: 1 }
+    },
+    {
+      id: 9002,
+      producedIn: 91,
+      timeMinutes: 60,
+      inputs: [],
+      output: { id: 7, am: 1 }
+    }
+  ];
+  snapshot.gameData.buildings = [
+    ...(snapshot.gameData.buildings as Record<string, unknown>[]),
+    {
+      id: 30,
+      name: "Bridge Workshop",
+      specialization: 2,
+      tier: 2,
+      requiredResearch: 0,
+      recipesIds: [3001],
+      workersNeeded: [10, 0, 0, 0],
+      constructionMaterials: [],
+      cost: 10_000_000
+    },
+    {
+      id: 40,
+      name: "Quantum Assembly",
+      specialization: 2,
+      tier: 3,
+      requiredResearch: 0,
+      recipesIds: [4001],
+      workersNeeded: [20, 10, 0, 0],
+      constructionMaterials: [],
+      cost: 50_000_000
+    },
+    {
+      id: 90,
+      name: "Uranium Mine",
+      specialization: 4,
+      tier: 5,
+      requiredResearch: 15,
+      recipesIds: [9001],
+      workersNeeded: [50, 25, 5, 0],
+      constructionMaterials: [],
+      cost: 100_000_000
+    },
+    {
+      id: 91,
+      name: "Aeridium Extractor",
+      specialization: 4,
+      tier: 5,
+      requiredResearch: 15,
+      recipesIds: [9002],
+      workersNeeded: [50, 25, 5, 0],
+      constructionMaterials: [],
+      cost: 140_000_000
+    }
+  ];
+  return snapshot;
 }

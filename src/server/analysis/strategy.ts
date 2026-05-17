@@ -230,11 +230,11 @@ function addProfitabilityPlans(
     existingRecipeIds.add(opportunity.recipeId);
   }
 
-  for (const opportunity of profitability.globalTargets.filter((item) => !existingRecipeIds.has(item.recipeId)).slice(0, 3)) {
+  for (const opportunity of (profitability.nextSteps ?? []).filter((item) => !existingRecipeIds.has(item.recipeId)).slice(0, 4)) {
     addProfitabilityPlan(plans, opportunity, context, intent, urgentOperations);
   }
 
-  for (const opportunity of (profitability.chainOpportunities ?? []).slice(0, 4)) {
+  for (const opportunity of (profitability.chainOpportunities ?? []).filter((item) => item.capitalFit === "affordable").slice(0, 4)) {
     addChainPlan(plans, opportunity, context, intent, urgentOperations);
   }
 }
@@ -272,9 +272,13 @@ function addProfitabilityPlan(
     latestUsefulByHours: opportunity.horizonId === "h12" ? 12 : opportunity.horizonId === "d1" ? 24 : opportunity.horizonId === "d3" ? 72 : 168,
     profitPerHour: opportunity.profitPerHour,
     marginPct: opportunity.marginPct,
-    profitabilityTag: opportunity.kind === "restructure_toward" ? "global target" : "company-fit",
+    profitabilityTag: opportunity.kind === "expand_for_recipe" ? "next feasible step" : "company-fit",
+    capitalFit: opportunity.capitalFit,
+    setupDistance: opportunity.setupDistance,
     expectedBenefit: `${formatMoney(opportunity.profitPerHour)}/h estimated net value${opportunity.marginPct !== undefined ? ` at ${formatPct(opportunity.marginPct)} margin` : ""}.`,
-    costSummary: opportunity.blockers.length > 0 ? opportunity.blockers.join(" ") : "No major setup gap visible from the read-only snapshot.",
+    costSummary: opportunity.setupCostEstimate && opportunity.setupCostEstimate > 0
+      ? `${formatMoney(opportunity.setupCostEstimate)} setup estimate; ${opportunity.cashImpactPct ?? 0}% of visible cash.`
+      : opportunity.blockers.length > 0 ? opportunity.blockers.join(" ") : "No major setup gap visible from the read-only snapshot.",
     risk: opportunity.kind === "restructure_toward"
       ? "This is a strategic target, not an immediate execution order; live prices, facility cost, and input supply must persist."
       : "Profitability can collapse if input prices rise, output depth disappears, or the production queue differs from the snapshot.",
@@ -328,7 +332,9 @@ function addChainPlan(
     latestUsefulByHours: opportunity.horizonId === "d1" ? 24 : opportunity.horizonId === "d3" ? 72 : 168,
     profitPerHour: opportunity.profitPerHour,
     marginPct: opportunity.marginPct,
-    profitabilityTag: opportunity.kind === "restructure_chain" ? "global chain" : "company-fit chain",
+    profitabilityTag: opportunity.kind === "restructure_chain" ? "next feasible chain" : "company-fit chain",
+    capitalFit: opportunity.capitalFit,
+    setupDistance: opportunity.setupDistance,
     expectedBenefit: `${formatMoney(opportunity.profitPerHour)}/h estimated chain value${opportunity.marginPct !== undefined ? ` at ${formatPct(opportunity.marginPct)} margin` : ""}.`,
     costSummary: opportunity.blockers.length > 0 ? opportunity.blockers.join(" ") : "No major chain setup gap visible from the read-only snapshot.",
     risk: opportunity.kind === "restructure_chain"
@@ -487,7 +493,8 @@ function computeSituation(
   const criticalRisks = stockoutRisks.filter((risk) => risk.severity === "critical").length;
   const highRisks = stockoutRisks.filter((risk) => risk.severity === "high").length;
   const warehouseMax = Math.max(0, ...normalized.warehouses.map((warehouse) => warehouse.utilization));
-  const profitTop = Math.max(0, ...profitability.companyFit.map((opportunity) => opportunity.score));
+  const practicalProfitOptions = [...profitability.companyFit, ...(profitability.nextSteps ?? [])];
+  const profitTop = Math.max(0, ...practicalProfitOptions.map((opportunity) => opportunity.score));
   const marketTop = Math.max(profitTop, ...marketSignals.map((signal) => Math.max(0, signal.recipeMarginPct ?? 0) + Math.abs(signal.spreadPct) + (signal.liquidityScore ?? 0) / 2));
   const dataWarnings = normalized.warnings;
 
@@ -501,7 +508,7 @@ function computeSituation(
     },
     production: pressureSummary(criticalRisks > 0 ? 90 : highRisks > 0 ? 70 : stockoutRisks.length > 0 ? 45 : 15, `${stockoutRisks.length} material risks, ${criticalRisks} critical.`),
     logistics: pressureSummary(logisticsMoves.length > 0 ? 65 : warehouseMax > 0.9 ? 60 : 20, `${logisticsMoves.length} feasible transfers, max warehouse utilization ${formatPct(warehouseMax * 100)}.`),
-    market: pressureSummary(clamp(marketTop), `${marketSignals.filter((signal) => signal.recommendation === "buy" || signal.recommendation === "sell").length} actionable market signals and ${profitability.companyFit.length} profitability candidates after company-fit filters.`),
+    market: pressureSummary(clamp(marketTop), `${marketSignals.filter((signal) => signal.recommendation === "buy" || signal.recommendation === "sell").length} actionable market signals, ${profitability.companyFit.length} company-fit profit candidates, and ${(profitability.nextSteps ?? []).length} feasible next steps.`),
     expansion: pressureSummary(expansionCandidates.some((candidate) => candidate.priority === "high") ? 65 : 35, `${expansionCandidates.length} expansion/base-plan candidates.`),
     dataQuality: {
       ...pressureSummary(dataWarnings.length > 0 ? 55 : 10, dataWarnings.length > 0 ? `${dataWarnings.length} snapshot warnings; review raw data before major moves.` : "No snapshot warnings."),
@@ -551,13 +558,19 @@ function buildThesis(
 ): string {
   const company = normalized.companyName;
   const topProfit = profitability.companyFit[0];
-  const topGlobal = profitability.globalTargets[0];
-  const topChain = profitability.chainOpportunities?.[0];
+  const topNextStep = profitability.nextSteps?.[0];
+  const topAspirational = topAspirationalTarget(profitability);
+  const topBlocked = topBlockedTarget(profitability);
+  const topChain = practicalChainOpportunities(profitability)[0];
   if (intent === "cv_growth") {
-    if (topProfit || topGlobal || topChain) {
+    if (topProfit || topNextStep || topAspirational || topChain) {
       const immediate = topProfit ? `${topProfit.title} (${formatMoney(topProfit.profitPerHour)}/h)` : "no company-fit profit move";
-      const strategic = topChain ? `${topChain.title} (${formatMoney(topChain.profitPerHour)}/h chain case)` : topGlobal ? `${topGlobal.title} (${formatMoney(topGlobal.profitPerHour)}/h)` : "no clear global target";
-      return `${company}'s CV path should be profit-led: use ${immediate} as the near-term proof point, then compare it against ${strategic} before restructuring or expanding.`;
+      const next = topNextStep ? `${topNextStep.title} (${topNextStep.capitalFit ?? "unknown"} capital fit)` : topChain ? `${topChain.title} (${topChain.capitalFit ?? "unknown"} capital fit)` : "no affordable next-step target";
+      const aspirational = topAspirational ? `${topAspirational.title} remains aspirational until ${topAspirational.firstPracticalStep ?? "its blockers are cleared"}` : "no separate aspirational target";
+      return `${company}'s CV path should be company-feasible: use ${immediate} as the near-term proof point, evaluate ${next} next, and keep ${aspirational}.`;
+    }
+    if (topBlocked) {
+      return `${company}'s CV path should stay grounded in current access and cash. ${topBlocked.title} is a blocked long-term reference, not a next move, until ${blockedReasonSummary(topBlocked)}.`;
     }
     if (noStrongAction) {
       return `${company} can work toward higher CV, but this snapshot does not justify a blind spend. Preserve cash, inspect the strongest current production lane, then choose deeper specialization or diversification only after a profitable chain is visible.`;
@@ -567,6 +580,7 @@ function buildThesis(
   if (intent === "market_profit") {
     if (topChain && topChain.kind !== "restructure_chain") return `${company}'s strongest profit angle is chain optimization: ${topChain.title}, estimated at ${formatMoney(topChain.profitPerHour)}/h across linked steps.`;
     if (topProfit) return `${company}'s best profit angle is ${topProfit.title}, estimated at ${formatMoney(topProfit.profitPerHour)}/h before omitted shipping/maintenance assumptions.`;
+    if (topNextStep) return `${company}'s best realistic profit path is ${topNextStep.title}; it fits current capital better than the blocked global targets.`;
     return topAction?.category === "market"
       ? `${company}'s best near-term profit move is ${topAction.title}, with manual exchange checks before committing.`
       : `${company} does not show a strong market trade right now; protect operations first and only trade after confirming depth and spreads in-game.`;
@@ -608,13 +622,19 @@ function buildRecommendedPath(
   const path = actionPlans.slice(0, 3).map((plan, index) => `${index + 1}. ${plan.horizonLabel ? `[${plan.horizonLabel}] ` : ""}${plan.title}: ${plan.whyNow ?? plan.expectedBenefit}`);
   if (intent === "cv_growth") {
     const topProfit = profitability.companyFit[0];
-    const topGlobal = profitability.globalTargets[0];
-    const topChain = profitability.chainOpportunities?.[0];
+    const topNextStep = profitability.nextSteps?.[0];
+    const topAspirational = topAspirationalTarget(profitability);
+    const topBlocked = topBlockedTarget(profitability);
+    const topChain = practicalChainOpportunities(profitability)[0];
     return [
       noStrongAction ? "1. Hold major spending until the Profitability tab identifies a real CV lever." : path[0] ?? "1. Execute the top ranked operational move first.",
       topProfit ? `2. Deepen current specialization only if ${topProfit.title} remains the near-term company-fit profit benchmark (${formatMoney(topProfit.profitPerHour)}/h).` : `2. Use the ${projections.horizons.map((horizon) => horizon.label).join(" / ")} timeline to separate blockers from CV prep.`,
-      topChain ? `3. Compare chain optimization against diversification using ${topChain.title}; advance only if all linked steps keep margin and coverage.` : topGlobal ? `3. Compare diversification against the global target ${topGlobal.title}; restructure only if setup gaps are affordable and live margins persist.` : "3. Compare deeper specialization against diversification using recipe profit, input availability, and facility requirements.",
-      "4. Commit cash only to the option with clear throughput, market access, and material coverage before the relevant horizon."
+      topNextStep ? `3. Evaluate the next feasible step ${topNextStep.title}; it is ${topNextStep.capitalFit ?? "unknown"} and should beat blocked global options before spending.` : topChain ? `3. Compare chain optimization using ${topChain.title}; advance only if all linked steps keep margin and coverage.` : "3. Compare deeper specialization against diversification using recipe profit, input availability, and facility requirements.",
+      topAspirational
+        ? `4. Keep ${topAspirational.title} as aspirational until ${topAspirational.firstPracticalStep ?? "capital and setup blockers are cleared"}.`
+        : topBlocked
+          ? "4. Keep blocked long-term references outside the plan; revisit them only after resource access, tech path, and known minimum capital are confirmed."
+          : "4. Commit cash only to the option with clear throughput, market access, and material coverage before the relevant horizon."
     ];
   }
   if (path.length > 0) return path;
@@ -639,16 +659,20 @@ function buildWhyThisPath(
   const actionableMarkets = marketSignals.filter((signal) => signal.recommendation === "buy" || signal.recommendation === "sell").length;
   const projectedShortageBands = projections.bands.filter((band) => band.materialNeeds.length > 0).map((band) => band.horizonId);
   const topProfit = profitability.companyFit[0];
-  const topGlobal = profitability.globalTargets[0];
-  const topChain = profitability.chainOpportunities?.[0];
+  const topNextStep = profitability.nextSteps?.[0];
+  const topAspirational = topAspirationalTarget(profitability);
+  const topBlocked = topBlockedTarget(profitability);
+  const topChain = practicalChainOpportunities(profitability)[0];
   return uniqueStrings([
     topAction ? `${topAction.title} is ranked highest with score ${Math.round(topAction.score ?? 0)} and ${topAction.confidence ?? "unknown"} confidence.` : "No ranked action was strong enough to justify immediate execution.",
     `Production pressure is ${situation.production.status}: ${situation.production.summary}`,
     `Logistics pressure is ${situation.logistics.status}: ${situation.logistics.summary}`,
     `Market pressure is ${situation.market.status}: ${actionableMarkets} actionable signals survived company-fit filters.`,
     topProfit ? `Top company-fit profitability option is ${topProfit.title} at ${formatMoney(topProfit.profitPerHour)}/h.` : "No company-fit profitable production option cleared the current filters.",
+    topNextStep ? `Top next feasible profit step is ${topNextStep.title} with ${topNextStep.capitalFit ?? "unknown"} capital fit.` : undefined,
     topChain ? `Best chain opportunity is ${topChain.title} at ${formatMoney(topChain.profitPerHour)}/h.` : undefined,
-    topGlobal ? `Best global restructure target is ${topGlobal.title} at ${formatMoney(topGlobal.profitPerHour)}/h, before setup validation.` : undefined,
+    topAspirational ? `Best aspirational target is ${topAspirational.title} at ${formatMoney(topAspirational.profitPerHour)}/h, but it is not a next action until blockers clear.` : undefined,
+    topBlocked ? `${topBlocked.title} is excluded from action ranking because ${blockedReasonSummary(topBlocked)}.` : undefined,
     stockoutRisks.length > 0 ? `${stockoutRisks.length} stockout risks are visible in the planning window.` : "No stockout risk is visible in the current planning window.",
     projectedShortageBands.length > 0 ? `Longer-horizon material pressure appears in ${projectedShortageBands.length} projection band(s).` : "No projected material shortfall appears in the configured horizons.",
     logisticsMoves.length > 0 ? `${logisticsMoves.length} owned-material transfer options are feasible.` : "No owned-material transfer is currently needed.",
@@ -665,8 +689,10 @@ function buildAlternatives(
 ): DecisionBrief["alternatives"] {
   if (intent === "cv_growth" || intent === "expansion") {
     const topProfit = profitability.companyFit[0];
-    const topGlobal = profitability.globalTargets[0];
-    const topChain = profitability.chainOpportunities?.[0];
+    const topNextStep = profitability.nextSteps?.[0];
+    const topAspirational = topAspirationalTarget(profitability);
+    const topBlocked = topBlockedTarget(profitability);
+    const topChain = practicalChainOpportunities(profitability)[0];
     return [
       {
         title: topChain && topChain.kind !== "restructure_chain" ? `Deepen ${topChain.title.replace(/^Optimize /, "")}` : topProfit ? `Deepen ${topProfit.title.replace(/^Run profitable |^Stage inputs for /, "")}` : "Deepen current specialization",
@@ -675,10 +701,20 @@ function buildAlternatives(
         chooseWhen: "Choose this when current recipe profit, input supply, and base capacity all support higher throughput."
       },
       {
-        title: topChain && topChain.kind === "restructure_chain" ? `Diversify toward ${topChain.title.replace(/^Restructure toward /, "")}` : topGlobal ? `Diversify toward ${topGlobal.title.replace(/^Restructure toward /, "")}` : "Diversify into another industry",
-        pros: [topChain && topChain.kind === "restructure_chain" ? `Global chain estimate: ${formatMoney(topChain.profitPerHour)}/h.` : topGlobal ? `Global target estimate: ${formatMoney(topGlobal.profitPerHour)}/h.` : "Can open new markets and reduce dependence on one production lane."],
-        cons: topChain && topChain.kind === "restructure_chain" && topChain.blockers.length ? topChain.blockers : topGlobal?.blockers.length ? topGlobal.blockers : ["Higher setup risk because facilities, materials, logistics, and sell demand may all be unknown."],
-        chooseWhen: "Choose this only when the global target beats the company-fit lane after setup cost, input depth, and output liquidity checks."
+        title: topNextStep ? `Take next feasible step: ${topNextStep.title}` : "Take the next affordable bridge step",
+        pros: [topNextStep ? `${topNextStep.capitalFit ?? "unknown"} capital fit with ${formatMoney(topNextStep.profitPerHour)}/h estimate.` : "Moves toward better profit without jumping to an unreachable global optimum."],
+        cons: topNextStep?.blockers.length ? topNextStep.blockers : ["Still requires live setup, input, and market validation."],
+        chooseWhen: "Choose this when it stays inside the current cash-risk spend cap and improves the current production path."
+      },
+      {
+        title: topAspirational
+          ? `Track aspirational target ${topAspirational.title.replace(/^Restructure toward /, "")}`
+          : topBlocked
+            ? `Review blocked reference ${topBlocked.title.replace(/^Restructure toward /, "")}`
+            : "Track aspirational global target",
+        pros: [topAspirational ? `Aspirational estimate: ${formatMoney(topAspirational.profitPerHour)}/h.` : topBlocked ? "Can guide later research, planet/base access, and capital planning without becoming a current spend." : "Can guide future research and expansion choices."],
+        cons: topAspirational?.blockers.length ? topAspirational.blockers : topBlocked ? uniqueStrings([...topBlocked.blockers, ...(topBlocked.blockingReasons ?? []), ...(topBlocked.unpricedRequirements ?? [])]).slice(0, 4) : ["Not feasible until cash, buildings, research, inputs, and market depth line up."],
+        chooseWhen: topAspirational ? "Choose this later, not now, after the capital gap and setup blockers are removed." : "Use this as reference only after planet/resource access, tech path, and known minimum capital are confirmed."
       },
       {
         title: "Delay major expansion",
@@ -714,6 +750,7 @@ function buildConstraints(
   expansionCandidates: ExpansionCandidate[],
   profitability: ProfitabilitySet
 ): string[] {
+  const topBlocked = topBlockedTarget(profitability);
   return uniqueStrings([
     "GT Agent is read-only; every recommendation must be verified in-game before execution.",
     situation.cash.summary,
@@ -721,6 +758,8 @@ function buildConstraints(
     logisticsMoves.length === 0 ? "No transfer candidate was found from owned inventory to current demand." : undefined,
     marketSignals.every((signal) => signal.recommendation !== "buy" && signal.recommendation !== "sell") ? "Market signals are watch-only after company-fit filters." : undefined,
     profitability.assumptions[1],
+    topBlocked ? `${topBlocked.title} is blocked-reference only; known minimum capital is ${topBlocked.knownMinimumCapital !== undefined ? formatMoney(topBlocked.knownMinimumCapital) : "unknown"}, before unpriced gaps.` : undefined,
+    topBlocked?.unpricedRequirements?.[0],
     profitability.warnings[0],
     expansionCandidates.every((candidate) => candidate.requiredMaterials.length === 0) ? "Expansion material requirements are not available in the read-only snapshot." : undefined,
     ...situation.dataQuality.warnings
@@ -735,14 +774,16 @@ function buildInspectNext(
   profitability: ProfitabilitySet
 ): string[] {
   const topPlan = actionPlans[0];
-  const topProfit = profitability.companyFit[0] ?? profitability.globalTargets[0];
-  const topChain = profitability.chainOpportunities?.[0];
+  const topProfit = profitability.companyFit[0] ?? profitability.nextSteps?.[0] ?? topAspirationalTarget(profitability);
+  const topBlocked = topBlockedTarget(profitability);
+  const topChain = practicalChainOpportunities(profitability)[0];
   return uniqueStrings([
     topPlan ? `Open the screen for "${topPlan.title}" and verify the snapshot still matches live state.` : "Open the current production/base overview and confirm there are no hidden blockers.",
     "Refresh exchange depth and price before any buy/sell decision.",
     "Check warehouse free tonnes before moving or buying bulky materials.",
     topProfit ? `Open the Profitability tab and verify ${topProfit.title} against live input/output prices.` : "Use the Profitability tab to find a production lane before long-term restructuring.",
     topChain ? `Open the Chains view and verify every linked step in ${topChain.title}.` : undefined,
+    topBlocked ? `Use Blocked long-term references to inspect ${topBlocked.title.replace(/^Restructure toward /, "")} only after planet/resource access, tech requirements, and known minimum capital are confirmed.` : undefined,
     intent === "cv_growth" ? "For CV growth, compare current specialization vs diversification by recipe margin, input availability, facility cost, and sell demand." : undefined,
     intent === "cv_growth" || intent === "expansion" ? "Open base plans and record required materials before committing expansion cash." : undefined,
     marketSignals[0] ? `Inspect ${marketSignals[0].matName} market depth because it is the strongest visible market signal.` : undefined,
@@ -755,6 +796,28 @@ function decisionConfidence(situation: CompanySituation, actionPlans: ActionPlan
   if (!noStrongAction && actionPlans[0]?.confidence === "high") return "high";
   if (noStrongAction) return "medium";
   return actionPlans[0]?.confidence ?? "medium";
+}
+
+function practicalChainOpportunities(profitability: ProfitabilitySet): ChainOpportunity[] {
+  return (profitability.chainOpportunities ?? []).filter((opportunity) => opportunity.capitalFit === "affordable" && (opportunity.blockingReasons ?? []).length === 0);
+}
+
+function topAspirationalTarget(profitability: ProfitabilitySet): ProfitabilityOpportunity | undefined {
+  return profitability.aspirationalTargets?.find((opportunity) => (opportunity.blockingReasons ?? []).length === 0 && opportunity.capitalFit !== "blocked" && opportunity.capitalFit !== "unknown");
+}
+
+function topBlockedTarget(profitability: ProfitabilitySet): ProfitabilityOpportunity | undefined {
+  return profitability.blockedTargets?.[0];
+}
+
+function blockedReasonSummary(opportunity: ProfitabilityOpportunity): string {
+  const reasons = uniqueStrings([
+    ...(opportunity.blockingReasons ?? []),
+    ...(opportunity.unpricedRequirements ?? []),
+    ...(opportunity.blockers ?? [])
+  ]);
+  if (reasons.length === 0) return "resource, tech, setup, and capital blockers are cleared";
+  return reasons.slice(0, 2).join(" and ");
 }
 
 function uniqueStrings(items: Array<string | undefined>): string[] {

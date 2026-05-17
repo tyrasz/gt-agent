@@ -120,6 +120,15 @@ export const marketSignalSchema = z.object({
 });
 export type MarketSignal = z.infer<typeof marketSignalSchema>;
 
+export const capitalFitSchema = z.enum(["affordable", "stretch", "blocked", "unknown"]);
+export type CapitalFit = z.infer<typeof capitalFitSchema>;
+
+export const setupDistanceSchema = z.enum(["ready", "one_step", "multi_step", "unreachable_now"]);
+export type SetupDistance = z.infer<typeof setupDistanceSchema>;
+
+export const setupCostCompletenessSchema = z.enum(["complete", "partial", "unknown"]);
+export type SetupCostCompleteness = z.infer<typeof setupCostCompletenessSchema>;
+
 export const profitabilityRecipeSchema = z.object({
   recipeId: z.number(),
   recipeName: z.string(),
@@ -141,7 +150,21 @@ export const profitabilityRecipeSchema = z.object({
   liquidityScore: z.number(),
   priceConfidence: z.enum(["low", "medium", "high"]),
   companyFit: z.enum(["owned", "active", "available", "target"]),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
+  resourceAccess: z.enum(["owned", "available", "blocked", "unknown"]).optional(),
+  planetRequirement: z.string().optional(),
+  techRequirement: z.string().optional(),
+  setupCostCompleteness: setupCostCompletenessSchema.optional(),
   setupCostEstimate: z.number().optional(),
+  knownMinimumCapital: z.number().optional(),
+  knownCapitalGap: z.number().optional(),
+  cashAfterSetup: z.number().optional(),
+  cashImpactPct: z.number().optional(),
+  firstPracticalStep: z.string().optional(),
+  missingPrerequisites: z.array(z.string()).default([]).optional(),
+  unpricedRequirements: z.array(z.string()).default([]).optional(),
+  blockingReasons: z.array(z.string()).default([]).optional(),
   setupGaps: z.array(z.string()).default([]),
   warnings: z.array(z.string()).default([])
 });
@@ -159,6 +182,21 @@ export const profitabilityOpportunitySchema = z.object({
   confidence: z.enum(["low", "medium", "high"]),
   profitPerHour: z.number(),
   marginPct: z.number().optional(),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
+  resourceAccess: z.enum(["owned", "available", "blocked", "unknown"]).optional(),
+  planetRequirement: z.string().optional(),
+  techRequirement: z.string().optional(),
+  setupCostCompleteness: setupCostCompletenessSchema.optional(),
+  setupCostEstimate: z.number().optional(),
+  knownMinimumCapital: z.number().optional(),
+  knownCapitalGap: z.number().optional(),
+  cashAfterSetup: z.number().optional(),
+  cashImpactPct: z.number().optional(),
+  firstPracticalStep: z.string().optional(),
+  missingPrerequisites: z.array(z.string()).default([]).optional(),
+  unpricedRequirements: z.array(z.string()).default([]).optional(),
+  blockingReasons: z.array(z.string()).default([]).optional(),
   rationale: z.array(z.string()).default([]),
   blockers: z.array(z.string()).default([]),
   actionId: z.string().optional()
@@ -174,6 +212,14 @@ export const productionChainStepSchema = z.object({
   netEstimatePerHour: z.number(),
   marginPct: z.number().optional(),
   companyFit: z.enum(["owned", "active", "available", "target"]),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
+  resourceAccess: z.enum(["owned", "available", "blocked", "unknown"]).optional(),
+  setupCostCompleteness: setupCostCompletenessSchema.optional(),
+  knownMinimumCapital: z.number().optional(),
+  knownCapitalGap: z.number().optional(),
+  unpricedRequirements: z.array(z.string()).default([]).optional(),
+  blockingReasons: z.array(z.string()).default([]).optional(),
   setupGaps: z.array(z.string()).default([])
 });
 export type ProductionChainStep = z.infer<typeof productionChainStepSchema>;
@@ -193,6 +239,19 @@ export const productionChainSchema = z.object({
   liquidityScore: z.number(),
   setupGaps: z.array(z.string()).default([]),
   companyFit: z.enum(["active", "owned", "available", "target"]),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
+  resourceAccess: z.enum(["owned", "available", "blocked", "unknown"]).optional(),
+  setupCostCompleteness: setupCostCompletenessSchema.optional(),
+  setupCostEstimate: z.number().optional(),
+  knownMinimumCapital: z.number().optional(),
+  knownCapitalGap: z.number().optional(),
+  cashAfterSetup: z.number().optional(),
+  cashImpactPct: z.number().optional(),
+  firstPracticalStep: z.string().optional(),
+  missingPrerequisites: z.array(z.string()).default([]).optional(),
+  unpricedRequirements: z.array(z.string()).default([]).optional(),
+  blockingReasons: z.array(z.string()).default([]).optional(),
   confidence: z.enum(["low", "medium", "high"]),
   warnings: z.array(z.string()).default([])
 });
@@ -211,6 +270,19 @@ export const chainOpportunitySchema = z.object({
   profitPerHour: z.number(),
   marginPct: z.number().optional(),
   inputCoveragePct: z.number().optional(),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
+  resourceAccess: z.enum(["owned", "available", "blocked", "unknown"]).optional(),
+  setupCostCompleteness: setupCostCompletenessSchema.optional(),
+  setupCostEstimate: z.number().optional(),
+  knownMinimumCapital: z.number().optional(),
+  knownCapitalGap: z.number().optional(),
+  cashAfterSetup: z.number().optional(),
+  cashImpactPct: z.number().optional(),
+  firstPracticalStep: z.string().optional(),
+  missingPrerequisites: z.array(z.string()).default([]).optional(),
+  unpricedRequirements: z.array(z.string()).default([]).optional(),
+  blockingReasons: z.array(z.string()).default([]).optional(),
   rationale: z.array(z.string()).default([]),
   blockers: z.array(z.string()).default([]),
   actionId: z.string().optional()
@@ -220,6 +292,9 @@ export type ChainOpportunity = z.infer<typeof chainOpportunitySchema>;
 export const profitabilitySetSchema = z.object({
   recipes: z.array(profitabilityRecipeSchema).default([]),
   companyFit: z.array(profitabilityOpportunitySchema).default([]),
+  nextSteps: z.array(profitabilityOpportunitySchema).default([]),
+  aspirationalTargets: z.array(profitabilityOpportunitySchema).default([]),
+  blockedTargets: z.array(profitabilityOpportunitySchema).default([]),
   globalTargets: z.array(profitabilityOpportunitySchema).default([]),
   chains: z.array(productionChainSchema).default([]),
   chainOpportunities: z.array(chainOpportunitySchema).default([]),
@@ -275,6 +350,8 @@ export const actionPlanSchema = z.object({
   profitPerHour: z.number().optional(),
   marginPct: z.number().optional(),
   profitabilityTag: z.string().optional(),
+  capitalFit: capitalFitSchema.optional(),
+  setupDistance: setupDistanceSchema.optional(),
   whyNow: z.string().optional(),
   bestWhen: z.string().optional(),
   avoidIf: z.string().optional(),
@@ -291,6 +368,49 @@ export const actionPlanSchema = z.object({
   preparedCommands: z.array(preparedCommandSchema).default([])
 });
 export type ActionPlan = z.infer<typeof actionPlanSchema>;
+
+export const decisionRequirementSchema = z.object({
+  matId: z.number(),
+  matName: z.string(),
+  quantity: z.number(),
+  availableQty: z.number().optional(),
+  shortageQty: z.number().optional(),
+  estimatedCost: z.number().optional()
+});
+export type DecisionRequirement = z.infer<typeof decisionRequirementSchema>;
+
+export const decisionPanelActionSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["contract", "exchange"]),
+  action: z.enum([
+    "fulfill_contract",
+    "prepare_contract",
+    "review_contract",
+    "skip_contract",
+    "buy_material",
+    "adjust_sell_offer",
+    "review_exchange"
+  ]),
+  title: z.string(),
+  priority: z.enum(["low", "medium", "high", "critical"]),
+  score: z.number(),
+  confidence: z.enum(["low", "medium", "high"]),
+  expectedValue: z.number().optional(),
+  cashImpactPct: z.number().optional(),
+  deadline: z.string().optional(),
+  requirements: z.array(decisionRequirementSchema).default([]),
+  blockers: z.array(z.string()).default([]),
+  evidence: z.array(z.string()).default([]),
+  preparedCommands: z.array(preparedCommandSchema).default([])
+});
+export type DecisionPanelAction = z.infer<typeof decisionPanelActionSchema>;
+
+export const decisionPanelSchema = z.object({
+  summary: z.string(),
+  actions: z.array(decisionPanelActionSchema).default([]),
+  warnings: z.array(z.string()).default([])
+});
+export type DecisionPanel = z.infer<typeof decisionPanelSchema>;
 
 export const decisionBriefAlternativeSchema = z.object({
   title: z.string(),
@@ -504,6 +624,7 @@ export const sitrepResponseSchema = z.object({
   model: z.string(),
   summary: z.string(),
   decisionBrief: decisionBriefSchema,
+  decisionPanel: decisionPanelSchema,
   projections: projectionSetSchema,
   actionPlans: z.array(actionPlanSchema),
   profitability: profitabilitySetSchema.optional(),

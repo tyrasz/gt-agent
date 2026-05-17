@@ -183,7 +183,11 @@ export class RestLlmPlanner implements LlmPlanner {
         return {
           ...input.deterministicSitrep,
           summary: draft.summary,
-          decisionBrief: mergeDecisionBriefNarrative(input.deterministicSitrep.decisionBrief, draft.decisionBriefNarrative),
+          decisionBrief: mergeDecisionBriefNarrative(
+            input.deterministicSitrep.decisionBrief,
+            draft.decisionBriefNarrative,
+            blockedTargetPhrases(input.deterministicSitrep)
+          ),
           actionPlans: mergeActionPlanNarratives(input.deterministicSitrep.actionPlans, draft.actionPlanNarratives),
           provider: input.provider,
           model: input.model,
@@ -331,12 +335,14 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
       summary: input.deterministicSitrep.summary,
       counts: {
         actionPlans: input.deterministicSitrep.actionPlans.length,
+        decisionActions: input.deterministicSitrep.decisionPanel.actions.length,
         marketSignals: input.deterministicSitrep.marketSignals.length,
         stockoutRisks: input.deterministicSitrep.stockoutRisks.length,
         expansionCandidates: input.deterministicSitrep.expansionCandidates.length,
         logisticsMoves: input.deterministicSitrep.logisticsMoves.length
       },
       decisionBrief: input.deterministicSitrep.decisionBrief,
+      decisionPanel: compactDecisionPanel(input.deterministicSitrep.decisionPanel),
       projections: compactProjections(input.deterministicSitrep.projections),
       profitability: compactProfitability(input.deterministicSitrep.profitability),
       history: compactHistory(input.deterministicSitrep.history),
@@ -360,9 +366,11 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
     "For decisionBriefNarrative, improve wording for the existing deterministic Decision Brief only. Do not change confidence or add alternatives whose titles are not already present.",
     "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, bestWhen, avoidIf, whatWouldChangeThis, or evidence wording.",
     "Use projections to explain the timeline, but do not add horizons, change projected quantities, or alter projection actionIds.",
-    "Use profitability to explain company-fit profit moves and long-horizon restructure targets, but do not change profitability calculations or rankings.",
+    "Use decisionPanel to explain contract and exchange choices, but do not add decision ids, reorder actions, or change contract/exchange feasibility.",
+    "Use profitability to explain company-fit profit moves and feasible long-horizon restructure targets, but do not change profitability calculations or rankings.",
+    "Blocked profitability targets are context only. Do not recommend blockedTargets as actions, timeline steps, or Decision Brief recommended-path items.",
     "Use history, trendSignals, and chainOpportunities to explain what persisted or changed, but do not change trend math, chain rankings, or action ids.",
-    "Do not return provider, model, generatedAt, rawSnapshot, profitability, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
+    "Do not return provider, model, generatedAt, rawSnapshot, decisionPanel, profitability, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
     "Use the situation, score breakdowns, profitability, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
     "Money values from GT raw fields are integer cents. Use the provided display strings such as cashDisplay and costSummary in player-facing prose.",
     JSON.stringify(compact)
@@ -513,6 +521,35 @@ function compactSituation(situation: SitrepResponse["situation"]) {
   };
 }
 
+function compactDecisionPanel(panel: SitrepResponse["decisionPanel"]) {
+  return {
+    summary: panel.summary,
+    actions: panel.actions.slice(0, 8).map((action) => ({
+      id: action.id,
+      kind: action.kind,
+      action: action.action,
+      title: action.title,
+      priority: action.priority,
+      score: action.score,
+      confidence: action.confidence,
+      expectedValue: action.expectedValue,
+      expectedValueDisplay: action.expectedValue !== undefined ? formatMoney(action.expectedValue) : undefined,
+      cashImpactPct: action.cashImpactPct,
+      deadline: action.deadline,
+      requirements: action.requirements.slice(0, 4),
+      blockers: action.blockers.slice(0, 4),
+      evidence: action.evidence.slice(0, 4),
+      preparedCommands: action.preparedCommands.slice(0, 2).map((command) => ({
+        type: command.type,
+        title: command.title,
+        executable: command.executable,
+        steps: command.steps.slice(0, 4)
+      }))
+    })),
+    warnings: panel.warnings
+  };
+}
+
 function compactProjections(projections: SitrepResponse["projections"]) {
   return {
     horizons: projections.horizons,
@@ -538,36 +575,11 @@ function compactProjections(projections: SitrepResponse["projections"]) {
 function compactProfitability(profitability: SitrepResponse["profitability"]) {
   if (!profitability) return undefined;
   return {
-    companyFit: profitability.companyFit.slice(0, 5).map((opportunity) => ({
-      id: opportunity.id,
-      kind: opportunity.kind,
-      recipeId: opportunity.recipeId,
-      title: opportunity.title,
-      recommendation: opportunity.recommendation,
-      horizonLabel: opportunity.horizonLabel,
-      score: opportunity.score,
-      confidence: opportunity.confidence,
-      profitPerHour: opportunity.profitPerHour,
-      profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
-      marginPct: opportunity.marginPct,
-      rationale: opportunity.rationale.slice(0, 3),
-      blockers: opportunity.blockers.slice(0, 4)
-    })),
-    globalTargets: profitability.globalTargets.slice(0, 5).map((opportunity) => ({
-      id: opportunity.id,
-      kind: opportunity.kind,
-      recipeId: opportunity.recipeId,
-      title: opportunity.title,
-      recommendation: opportunity.recommendation,
-      horizonLabel: opportunity.horizonLabel,
-      score: opportunity.score,
-      confidence: opportunity.confidence,
-      profitPerHour: opportunity.profitPerHour,
-      profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
-      marginPct: opportunity.marginPct,
-      rationale: opportunity.rationale.slice(0, 3),
-      blockers: opportunity.blockers.slice(0, 4)
-    })),
+    companyFit: profitability.companyFit.slice(0, 5).map(compactProfitabilityOpportunity),
+    nextSteps: profitability.nextSteps.slice(0, 5).map(compactProfitabilityOpportunity),
+    aspirationalTargets: profitability.aspirationalTargets.slice(0, 5).map(compactProfitabilityOpportunity),
+    blockedTargets: profitability.blockedTargets.slice(0, 5).map(compactProfitabilityOpportunity),
+    globalTargets: profitability.globalTargets.slice(0, 5).map(compactProfitabilityOpportunity),
     chainOpportunities: profitability.chainOpportunities.slice(0, 5).map(compactChainOpportunity),
     chains: profitability.chains.slice(0, 5).map((chain) => ({
       id: chain.id,
@@ -580,6 +592,18 @@ function compactProfitability(profitability: SitrepResponse["profitability"]) {
       inputCoveragePct: chain.inputCoveragePct,
       liquidityScore: chain.liquidityScore,
       companyFit: chain.companyFit,
+      capitalFit: chain.capitalFit,
+      setupDistance: chain.setupDistance,
+      resourceAccess: chain.resourceAccess,
+      setupCostCompleteness: chain.setupCostCompleteness,
+      knownMinimumCapital: chain.knownMinimumCapital,
+      knownMinimumCapitalDisplay: chain.knownMinimumCapital !== undefined ? formatMoney(chain.knownMinimumCapital) : undefined,
+      knownCapitalGap: chain.knownCapitalGap,
+      knownCapitalGapDisplay: chain.knownCapitalGap !== undefined ? formatMoney(chain.knownCapitalGap) : undefined,
+      firstPracticalStep: chain.firstPracticalStep,
+      missingPrerequisites: chain.missingPrerequisites?.slice(0, 4),
+      unpricedRequirements: chain.unpricedRequirements?.slice(0, 4),
+      blockingReasons: chain.blockingReasons?.slice(0, 4),
       confidence: chain.confidence,
       setupGaps: chain.setupGaps.slice(0, 4),
       steps: chain.steps.map((step) => ({
@@ -587,7 +611,11 @@ function compactProfitability(profitability: SitrepResponse["profitability"]) {
         outputMatName: step.outputMatName,
         buildingName: step.buildingName,
         netEstimatePerHour: step.netEstimatePerHour,
-        companyFit: step.companyFit
+        companyFit: step.companyFit,
+        capitalFit: step.capitalFit,
+        resourceAccess: step.resourceAccess,
+        setupCostCompleteness: step.setupCostCompleteness,
+        blockingReasons: step.blockingReasons?.slice(0, 3)
       }))
     })),
     topRecipes: profitability.recipes.slice(0, 8).map((recipe) => ({
@@ -601,11 +629,59 @@ function compactProfitability(profitability: SitrepResponse["profitability"]) {
       inputCoveragePct: recipe.inputCoveragePct,
       liquidityScore: recipe.liquidityScore,
       companyFit: recipe.companyFit,
+      capitalFit: recipe.capitalFit,
+      setupDistance: recipe.setupDistance,
+      resourceAccess: recipe.resourceAccess,
+      planetRequirement: recipe.planetRequirement,
+      techRequirement: recipe.techRequirement,
+      setupCostCompleteness: recipe.setupCostCompleteness,
+      knownMinimumCapital: recipe.knownMinimumCapital,
+      knownMinimumCapitalDisplay: recipe.knownMinimumCapital !== undefined ? formatMoney(recipe.knownMinimumCapital) : undefined,
+      knownCapitalGap: recipe.knownCapitalGap,
+      knownCapitalGapDisplay: recipe.knownCapitalGap !== undefined ? formatMoney(recipe.knownCapitalGap) : undefined,
+      firstPracticalStep: recipe.firstPracticalStep,
+      missingPrerequisites: recipe.missingPrerequisites?.slice(0, 4),
+      unpricedRequirements: recipe.unpricedRequirements?.slice(0, 4),
+      blockingReasons: recipe.blockingReasons?.slice(0, 4),
       setupGaps: recipe.setupGaps.slice(0, 4),
       confidence: recipe.priceConfidence
     })),
     assumptions: profitability.assumptions,
     warnings: profitability.warnings.slice(0, 5)
+  };
+}
+
+function compactProfitabilityOpportunity(opportunity: NonNullable<SitrepResponse["profitability"]>["companyFit"][number]) {
+  return {
+    id: opportunity.id,
+    kind: opportunity.kind,
+    recipeId: opportunity.recipeId,
+    title: opportunity.title,
+    recommendation: opportunity.recommendation,
+    horizonLabel: opportunity.horizonLabel,
+    score: opportunity.score,
+    confidence: opportunity.confidence,
+    capitalFit: opportunity.capitalFit,
+    setupDistance: opportunity.setupDistance,
+    resourceAccess: opportunity.resourceAccess,
+    planetRequirement: opportunity.planetRequirement,
+    techRequirement: opportunity.techRequirement,
+    setupCostCompleteness: opportunity.setupCostCompleteness,
+    setupCostEstimate: opportunity.setupCostEstimate,
+    knownMinimumCapital: opportunity.knownMinimumCapital,
+    knownMinimumCapitalDisplay: opportunity.knownMinimumCapital !== undefined ? formatMoney(opportunity.knownMinimumCapital) : undefined,
+    knownCapitalGap: opportunity.knownCapitalGap,
+    knownCapitalGapDisplay: opportunity.knownCapitalGap !== undefined ? formatMoney(opportunity.knownCapitalGap) : undefined,
+    cashImpactPct: opportunity.cashImpactPct,
+    firstPracticalStep: opportunity.firstPracticalStep,
+    missingPrerequisites: opportunity.missingPrerequisites?.slice(0, 4),
+    unpricedRequirements: opportunity.unpricedRequirements?.slice(0, 4),
+    blockingReasons: opportunity.blockingReasons?.slice(0, 4),
+    profitPerHour: opportunity.profitPerHour,
+    profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
+    marginPct: opportunity.marginPct,
+    rationale: opportunity.rationale.slice(0, 3),
+    blockers: opportunity.blockers.slice(0, 4)
   };
 }
 
@@ -623,6 +699,20 @@ function compactChainOpportunity(opportunity: NonNullable<SitrepResponse["chainO
     profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
     marginPct: opportunity.marginPct,
     inputCoveragePct: opportunity.inputCoveragePct,
+    capitalFit: opportunity.capitalFit,
+    setupDistance: opportunity.setupDistance,
+    resourceAccess: opportunity.resourceAccess,
+    setupCostCompleteness: opportunity.setupCostCompleteness,
+    setupCostEstimate: opportunity.setupCostEstimate,
+    knownMinimumCapital: opportunity.knownMinimumCapital,
+    knownMinimumCapitalDisplay: opportunity.knownMinimumCapital !== undefined ? formatMoney(opportunity.knownMinimumCapital) : undefined,
+    knownCapitalGap: opportunity.knownCapitalGap,
+    knownCapitalGapDisplay: opportunity.knownCapitalGap !== undefined ? formatMoney(opportunity.knownCapitalGap) : undefined,
+    cashImpactPct: opportunity.cashImpactPct,
+    firstPracticalStep: opportunity.firstPracticalStep,
+    missingPrerequisites: opportunity.missingPrerequisites?.slice(0, 4),
+    unpricedRequirements: opportunity.unpricedRequirements?.slice(0, 4),
+    blockingReasons: opportunity.blockingReasons?.slice(0, 4),
     rationale: opportunity.rationale.slice(0, 3),
     blockers: opportunity.blockers.slice(0, 4)
   };
@@ -687,13 +777,17 @@ function mergeDecisionBriefNarrative(
     alternatives?: Array<{ title: string; pros?: string[]; cons?: string[]; chooseWhen?: string }>;
     constraints?: string[];
     inspectNext?: string[];
-  }
+  },
+  blockedPhrases: string[] = []
 ): SitrepResponse["decisionBrief"] {
   const alternativesByTitle = new Map((narrative.alternatives ?? []).map((alternative) => [alternative.title, alternative]));
+  const narrativeRecommendedPath = narrative.recommendedPath?.length && !narrative.recommendedPath.some((item) => mentionsBlockedTarget(item, blockedPhrases))
+    ? narrative.recommendedPath
+    : undefined;
   return {
     ...brief,
     thesis: narrative.thesis || brief.thesis,
-    recommendedPath: narrative.recommendedPath?.length ? narrative.recommendedPath : brief.recommendedPath,
+    recommendedPath: narrativeRecommendedPath ?? brief.recommendedPath,
     whyThisPath: narrative.whyThisPath?.length ? narrative.whyThisPath : brief.whyThisPath,
     constraints: narrative.constraints?.length ? narrative.constraints : brief.constraints,
     inspectNext: narrative.inspectNext?.length ? narrative.inspectNext : brief.inspectNext,
@@ -708,6 +802,20 @@ function mergeDecisionBriefNarrative(
       };
     })
   };
+}
+
+function blockedTargetPhrases(sitrep: SitrepResponse): string[] {
+  return [...new Set((sitrep.profitability?.blockedTargets ?? []).flatMap((target) => [
+    target.title,
+    target.title.replace(/^Restructure toward /, ""),
+    ...target.blockers,
+    ...(target.blockingReasons ?? [])
+  ]).map((value) => value.trim()).filter(Boolean))];
+}
+
+function mentionsBlockedTarget(text: string, blockedPhrases: string[]): boolean {
+  const lower = text.toLowerCase();
+  return blockedPhrases.some((phrase) => phrase.length >= 4 && lower.includes(phrase.toLowerCase()));
 }
 
 function mergeActionPlanNarratives(

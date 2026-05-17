@@ -11,6 +11,7 @@ import {
   GitBranch,
   History,
   KeyRound,
+  ListChecks,
   Loader2,
   LogOut,
   Map,
@@ -32,7 +33,7 @@ import type {
   WhatIfScenarioResult
 } from "../shared/schemas.js";
 
-type Tab = "sitrep" | "market" | "profitability" | "chains" | "whatif" | "operations" | "logistics" | "expansion" | "raw";
+type Tab = "sitrep" | "decisions" | "market" | "profitability" | "chains" | "whatif" | "operations" | "logistics" | "expansion" | "raw";
 
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
@@ -41,13 +42,13 @@ const providerLabels: Record<Provider, string> = {
 };
 
 const defaultModels: Record<Provider, string> = {
-  openai: "gpt-5.5-mini",
+  openai: "gpt-4.1-mini",
   anthropic: "claude-sonnet-4-6",
   gemini: "gemini-3.1-pro-preview"
 };
 
 const fallbackModelOptions: Record<Provider, ModelOption[]> = {
-  openai: ["gpt-5.5-mini", "gpt-5.4-mini", "gpt-5.2-mini", "gpt-4.1-mini", "gpt-5.5", "gpt-5.4", "gpt-4.1"].map((id) => ({ id, label: id, source: "fallback" })),
+  openai: ["gpt-4.1-mini", "gpt-4o-mini", "gpt-5-mini", "gpt-5-nano", "gpt-5", "gpt-4.1", "gpt-4o"].map((id) => ({ id, label: id, source: "fallback" })),
   anthropic: ["claude-opus-4-7", "claude-sonnet-4-6", "claude-haiku-4-5"].map((id) => ({ id, label: id, source: "fallback" })),
   gemini: ["gemini-3.1-pro-preview", "gemini-3-flash-preview", "gemini-3.1-flash-lite", "gemini-2.5-pro", "gemini-2.5-flash"].map((id) => ({ id, label: id, source: "fallback" }))
 };
@@ -60,6 +61,7 @@ function isLargeModelId(modelId: string): boolean {
 
 const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
   { id: "sitrep", label: "Sitrep", icon: ClipboardList },
+  { id: "decisions", label: "Decisions", icon: ListChecks },
   { id: "market", label: "Market", icon: BarChart3 },
   { id: "profitability", label: "Profitability", icon: TrendingUp },
   { id: "chains", label: "Chains", icon: GitBranch },
@@ -108,7 +110,7 @@ export default function App() {
   const modelTimeoutCopy = selectedModelIsLarge
     ? "Large model selected. This can wait up to 12 minutes."
     : provider === "openai"
-      ? "Fast OpenAI models are selected by default. Full models like gpt-5.5 may take longer."
+      ? "Fast OpenAI models are selected by default. Full models like gpt-5 may take longer."
       : "Fast model selected. Larger models may take longer.";
 
   useEffect(() => {
@@ -218,7 +220,11 @@ export default function App() {
       const body = await response.json().catch(() => ({}));
       if (!response.ok) {
         const detail = body.details?.endpoint ? ` (${body.details.endpoint})` : "";
-        throw new Error(`${body.error ?? "Could not generate sitrep."}${detail}`);
+        const message = `${body.error ?? "Could not generate sitrep."}${detail}`;
+        if (/model.*does not exist|model.*not found|unavailable/i.test(message)) {
+          void loadModels(provider, true);
+        }
+        throw new Error(message);
       }
       setSitrep(body);
       setActiveTab("sitrep");
@@ -443,7 +449,7 @@ export default function App() {
             {modelCatalog?.warnings.length ? <p className="warning-text">{modelCatalog.warnings.join(" ")}</p> : null}
             {modelError ? <p className="error-line">{modelError}</p> : null}
             {runError ? <p className="error-line">{runError}</p> : null}
-            <button className="primary-button run-button" type="submit" disabled={runLoading || !selectedModel}>
+            <button className="primary-button run-button" type="submit" disabled={runLoading || modelLoading || !selectedModel}>
               {runLoading ? <Loader2 className="spin" size={18} /> : <Send size={18} />}
               Generate Sitrep
             </button>
@@ -544,6 +550,10 @@ function DashboardTab({
         ))}
       </div>
     );
+  }
+
+  if (tab === "decisions") {
+    return <DecisionsPanel sitrep={sitrep} />;
   }
 
   if (tab === "operations") {
@@ -653,6 +663,7 @@ function DashboardTab({
                 {plan.profitPerHour !== undefined ? <span className="profit-chip">{moneyPerHour(plan.profitPerHour)}</span> : null}
                 {plan.marginPct !== undefined ? <span className="profit-chip">{Math.round(plan.marginPct)}% margin</span> : null}
                 {plan.profitabilityTag ? <span className="profit-chip">{plan.profitabilityTag}</span> : null}
+                {plan.capitalFit ? <span className={`capital-chip ${plan.capitalFit}`}>{capitalFitLabel(plan.capitalFit)}</span> : null}
                 {plan.score !== undefined ? <span className="score-chip">{Math.round(plan.score)}</span> : null}
                 {plan.confidence ? <span className="confidence-chip">{plan.confidence}</span> : null}
                 <span className={`priority ${plan.priority}`}>{plan.priority}</span>
@@ -677,6 +688,80 @@ function DashboardTab({
             {plan.preparedCommands.length > 0 ? (
               <div className="command-list">
                 {plan.preparedCommands.map((command) => (
+                  <details key={command.title}>
+                    <summary>{command.title}</summary>
+                    <ol>{command.steps.map((step) => <li key={step}>{step}</li>)}</ol>
+                  </details>
+                ))}
+              </div>
+            ) : null}
+          </article>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function DecisionsPanel({ sitrep }: { sitrep: SitrepResponse }) {
+  const panel = sitrep.decisionPanel;
+  const actions = panel?.actions ?? [];
+
+  if (!panel || actions.length === 0) {
+    return (
+      <div className="empty-state compact">
+        <ListChecks size={28} />
+        <h2>No contract or exchange decision cleared the current filters</h2>
+        <p>Raw snapshot data remains available for inspection, but no current contract or exchange action was ranked above review level.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="decision-stack">
+      <section className="decision-summary">
+        <div>
+          <span className="category">Decision panel</span>
+          <h2>{panel.summary}</h2>
+        </div>
+        {panel.warnings.length > 0 ? <span className="tag watch">{panel.warnings.length} warnings</span> : null}
+      </section>
+      <div className="decision-action-grid">
+        {actions.map((action) => (
+          <article className="decision-card" key={action.id}>
+            <header>
+              <div>
+                <span className="category">{action.kind} / {decisionActionLabel(action.action)}</span>
+                <h3>{action.title}</h3>
+              </div>
+              <div className="plan-badges">
+                {action.expectedValue !== undefined ? <span className="profit-chip">{moneyDelta(action.expectedValue)} value</span> : null}
+                {action.cashImpactPct !== undefined ? <span className="horizon-chip">{Math.round(action.cashImpactPct)}% cash</span> : null}
+                {action.deadline ? <span className="horizon-chip">{action.deadline}</span> : null}
+                <span className="score-chip">{Math.round(action.score)}</span>
+                <span className={`confidence-chip ${action.confidence}`}>{action.confidence}</span>
+                <span className={`priority ${action.priority}`}>{action.priority}</span>
+              </div>
+            </header>
+            {action.requirements.length > 0 ? (
+              <div className="requirement-grid">
+                {action.requirements.slice(0, 4).map((requirement) => (
+                  <div className="requirement-row" key={`${action.id}-${requirement.matId}`}>
+                    <strong>{requirement.matName}</strong>
+                    <span>Need {Math.ceil(requirement.quantity).toLocaleString()}</span>
+                    {requirement.availableQty !== undefined ? <span>Have {Math.floor(requirement.availableQty).toLocaleString()}</span> : null}
+                    {requirement.shortageQty !== undefined && requirement.shortageQty > 0 ? <span>Short {Math.ceil(requirement.shortageQty).toLocaleString()}</span> : null}
+                    {requirement.estimatedCost !== undefined ? <span>{money(requirement.estimatedCost)}</span> : null}
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            {action.blockers.length > 0 ? <p className="warning-text">{action.blockers.slice(0, 3).join(" ")}</p> : null}
+            <div className="evidence-list">
+              {action.evidence.slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+            </div>
+            {action.preparedCommands.length > 0 ? (
+              <div className="command-list">
+                {action.preparedCommands.map((command) => (
                   <details key={command.title}>
                     <summary>{command.title}</summary>
                     <ol>{command.steps.map((step) => <li key={step}>{step}</li>)}</ol>
@@ -812,7 +897,7 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
       <section className="profitability-summary">
         <div>
           <span className="category">Profitability</span>
-          <h2>Company-fit profit moves first, global targets second</h2>
+          <h2>Company-feasible profit path first, aspirational targets separate</h2>
         </div>
         <div className="profitability-notes">
           {profitability.assumptions.slice(0, 3).map((item) => <span key={item}>{item}</span>)}
@@ -820,7 +905,9 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
         </div>
       </section>
       <ProfitabilityOpportunityGrid title="Company-fit now" opportunities={profitability.companyFit} />
-      <ProfitabilityOpportunityGrid title="Global targets to restructure toward" opportunities={profitability.globalTargets} />
+      <ProfitabilityOpportunityGrid title="Next feasible steps" opportunities={profitability.nextSteps ?? []} emptyText="No affordable progression step cleared the current cash-risk gate." />
+      <ProfitabilityOpportunityGrid title="Aspirational targets" opportunities={profitability.aspirationalTargets ?? []} emptyText="No separate aspirational target was identified." />
+      <ProfitabilityOpportunityGrid title="Blocked long-term references" opportunities={profitability.blockedTargets ?? []} emptyText="No blocked long-term target was identified." />
       {(profitability.chainOpportunities ?? []).length > 0 ? (
         <section className="profitability-section">
           <header>
@@ -838,12 +925,19 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
                   <div className="plan-badges">
                     <span className="horizon-chip">{opportunity.horizonLabel}</span>
                     <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                    {opportunity.capitalFit ? <span className={`capital-chip ${opportunity.capitalFit}`}>{capitalFitLabel(opportunity.capitalFit)}</span> : null}
                     <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
                   </div>
                 </header>
                 <p>{opportunity.recommendation}</p>
+                {opportunity.firstPracticalStep ? <p><strong>Next practical step:</strong> {opportunity.firstPracticalStep}</p> : null}
+                <dl>
+                  <div><dt>Known minimum</dt><dd>{opportunity.knownMinimumCapital !== undefined ? money(opportunity.knownMinimumCapital) : "n/a"}</dd></div>
+                  <div><dt>Known gap</dt><dd>{opportunity.knownCapitalGap !== undefined ? money(opportunity.knownCapitalGap) : "n/a"}</dd></div>
+                  <div><dt>Setup completeness</dt><dd>{opportunity.setupCostCompleteness ?? "n/a"}</dd></div>
+                </dl>
                 <div className="evidence-list">
-                  {[...opportunity.rationale, ...opportunity.blockers].slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+                  {evidenceItems(opportunity).slice(0, 7).map((item) => <span key={item}>{item}</span>)}
                 </div>
               </article>
             ))}
@@ -876,7 +970,10 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
               <span>{recipe.marginPct !== undefined ? `${Math.round(recipe.marginPct)}%` : "n/a"}</span>
               <span>{moneyPerHour(recipe.inputCostPerHour)}</span>
               <span>{Math.round(recipe.inputCoveragePct)}%</span>
-              <span><span className={`confidence-chip ${recipe.priceConfidence}`}>{recipe.companyFit}</span></span>
+              <span>
+                <span className={`confidence-chip ${recipe.priceConfidence}`}>{recipe.companyFit}</span>
+                {recipe.capitalFit ? <span className={`capital-chip ${recipe.capitalFit}`}>{capitalFitLabel(recipe.capitalFit)}</span> : null}
+              </span>
             </div>
           ))}
         </div>
@@ -904,7 +1001,7 @@ function ChainsPanel({ sitrep }: { sitrep: SitrepResponse }) {
       <section className="profitability-summary">
         <div>
           <span className="category">Chain optimizer</span>
-          <h2>Linked production paths ranked by profit, coverage, fit, and liquidity</h2>
+          <h2>Linked paths ranked by first feasible step, capital fit, and profit</h2>
         </div>
         <div className="profitability-notes">
           {opportunities.slice(0, 4).map((opportunity) => (
@@ -928,17 +1025,22 @@ function ChainsPanel({ sitrep }: { sitrep: SitrepResponse }) {
                 <div className="plan-badges">
                   <span className="score-chip">{Math.round(opportunity.score)}</span>
                   <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                  {opportunity.capitalFit ? <span className={`capital-chip ${opportunity.capitalFit}`}>{capitalFitLabel(opportunity.capitalFit)}</span> : null}
                   <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
                 </div>
               </header>
               <p>{opportunity.recommendation}</p>
+              {opportunity.firstPracticalStep ? <p><strong>Next practical step:</strong> {opportunity.firstPracticalStep}</p> : null}
               <dl>
                 <div><dt>Horizon</dt><dd>{opportunity.horizonLabel}</dd></div>
                 <div><dt>Coverage</dt><dd>{Math.round(opportunity.inputCoveragePct ?? 0)}%</dd></div>
                 <div><dt>Margin</dt><dd>{opportunity.marginPct !== undefined ? `${Math.round(opportunity.marginPct)}%` : "n/a"}</dd></div>
+                <div><dt>Known minimum</dt><dd>{opportunity.knownMinimumCapital !== undefined ? money(opportunity.knownMinimumCapital) : "n/a"}</dd></div>
+                <div><dt>Known gap</dt><dd>{opportunity.knownCapitalGap !== undefined ? money(opportunity.knownCapitalGap) : "n/a"}</dd></div>
+                <div><dt>Setup completeness</dt><dd>{opportunity.setupCostCompleteness ?? "n/a"}</dd></div>
               </dl>
               <div className="evidence-list">
-                {[...opportunity.rationale, ...opportunity.blockers].slice(0, 6).map((item) => <span key={item}>{item}</span>)}
+                {evidenceItems(opportunity).slice(0, 7).map((item) => <span key={item}>{item}</span>)}
               </div>
             </article>
           ))}
@@ -959,20 +1061,27 @@ function ChainsPanel({ sitrep }: { sitrep: SitrepResponse }) {
                 </div>
                 <div className="plan-badges">
                   <span className="profit-chip">{moneyPerHour(chain.totalNetProfitPerHour)}</span>
+                  {chain.capitalFit ? <span className={`capital-chip ${chain.capitalFit}`}>{capitalFitLabel(chain.capitalFit)}</span> : null}
                   <span className={`confidence-chip ${chain.confidence}`}>{chain.confidence}</span>
                 </div>
               </header>
+              {chain.firstPracticalStep ? <p><strong>Next practical step:</strong> {chain.firstPracticalStep}</p> : null}
               <dl>
                 <div><dt>Coverage</dt><dd>{Math.round(chain.inputCoveragePct)}%</dd></div>
                 <div><dt>Liquidity</dt><dd>{Math.round(chain.liquidityScore)}</dd></div>
                 <div><dt>Margin</dt><dd>{chain.marginPct !== undefined ? `${Math.round(chain.marginPct)}%` : "n/a"}</dd></div>
+                <div><dt>Known minimum</dt><dd>{chain.knownMinimumCapital !== undefined ? money(chain.knownMinimumCapital) : "n/a"}</dd></div>
+                <div><dt>Known gap</dt><dd>{chain.knownCapitalGap !== undefined ? money(chain.knownCapitalGap) : "n/a"}</dd></div>
+                <div><dt>Setup completeness</dt><dd>{chain.setupCostCompleteness ?? "n/a"}</dd></div>
               </dl>
               <div className="chain-step-list">
                 {chain.steps.map((step, index) => (
                   <span key={`${chain.id}-${step.recipeId}`}>{index + 1}. {step.outputMatName} ({moneyPerHour(step.netEstimatePerHour)})</span>
                 ))}
               </div>
-              {chain.setupGaps.length > 0 ? <p className="warning-text">{chain.setupGaps.slice(0, 4).join(" ")}</p> : null}
+              {[...chain.setupGaps, ...(chain.blockingReasons ?? []), ...(chain.unpricedRequirements ?? [])].length > 0 ? (
+                <p className="warning-text">{[...new Set([...chain.setupGaps, ...(chain.blockingReasons ?? []), ...(chain.unpricedRequirements ?? [])])].slice(0, 5).join(" ")}</p>
+              ) : null}
             </article>
           ))}
         </div>
@@ -1195,7 +1304,15 @@ function ScenarioCard({ label, state }: { label: string; state: WhatIfScenarioRe
   );
 }
 
-function ProfitabilityOpportunityGrid({ title, opportunities }: { title: string; opportunities: NonNullable<SitrepResponse["profitability"]>["companyFit"] }) {
+function ProfitabilityOpportunityGrid({
+  title,
+  opportunities,
+  emptyText = "Use the raw snapshot or a fresh run after production/market state changes."
+}: {
+  title: string;
+  opportunities: NonNullable<SitrepResponse["profitability"]>["companyFit"];
+  emptyText?: string;
+}) {
   return (
     <section className="profitability-section">
       <header>
@@ -1206,7 +1323,7 @@ function ProfitabilityOpportunityGrid({ title, opportunities }: { title: string;
         {opportunities.length === 0 ? (
           <article className="data-card wide">
             <strong>No option cleared the filters</strong>
-            <p>Use the raw snapshot or a fresh run after production/market state changes.</p>
+            <p>{emptyText}</p>
           </article>
         ) : opportunities.map((opportunity) => (
           <article className="data-card wide" key={opportunity.id}>
@@ -1218,17 +1335,25 @@ function ProfitabilityOpportunityGrid({ title, opportunities }: { title: string;
               <div className="plan-badges">
                 <span className="horizon-chip">{opportunity.horizonLabel}</span>
                 <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                {opportunity.capitalFit ? <span className={`capital-chip ${opportunity.capitalFit}`}>{capitalFitLabel(opportunity.capitalFit)}</span> : null}
+                {opportunity.setupDistance ? <span className="horizon-chip">{opportunity.setupDistance.replaceAll("_", " ")}</span> : null}
                 <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
               </div>
             </header>
             <p>{opportunity.recommendation}</p>
+            {opportunity.firstPracticalStep ? <p><strong>Next practical step:</strong> {opportunity.firstPracticalStep}</p> : null}
             <dl>
               <div><dt>Score</dt><dd>{Math.round(opportunity.score)}</dd></div>
               <div><dt>Margin</dt><dd>{opportunity.marginPct !== undefined ? `${Math.round(opportunity.marginPct)}%` : "n/a"}</dd></div>
               <div><dt>Recipe</dt><dd>{opportunity.recipeId}</dd></div>
+              <div><dt>Setup</dt><dd>{opportunity.setupCostEstimate !== undefined ? money(opportunity.setupCostEstimate) : "n/a"}</dd></div>
+              <div><dt>Known minimum</dt><dd>{opportunity.knownMinimumCapital !== undefined ? money(opportunity.knownMinimumCapital) : "n/a"}</dd></div>
+              <div><dt>Known gap</dt><dd>{opportunity.knownCapitalGap !== undefined ? money(opportunity.knownCapitalGap) : "n/a"}</dd></div>
+              <div><dt>Setup completeness</dt><dd>{opportunity.setupCostCompleteness ?? "n/a"}</dd></div>
+              <div><dt>Cash impact</dt><dd>{opportunity.cashImpactPct !== undefined ? `${Math.round(opportunity.cashImpactPct)}%` : "n/a"}</dd></div>
             </dl>
             <div className="evidence-list">
-              {[...opportunity.rationale, ...opportunity.blockers].slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+              {evidenceItems(opportunity).slice(0, 7).map((item) => <span key={item}>{item}</span>)}
             </div>
           </article>
         ))}
@@ -1314,7 +1439,31 @@ function moneyPerHour(cents: number) {
   return `${money(cents)}/h`;
 }
 
+function evidenceItems(item: {
+  rationale?: string[];
+  blockers?: string[];
+  blockingReasons?: string[];
+  unpricedRequirements?: string[];
+}) {
+  return [...new Set([
+    ...(item.rationale ?? []),
+    ...(item.blockers ?? []),
+    ...(item.blockingReasons ?? []),
+    ...(item.unpricedRequirements ?? [])
+  ])].filter((value) => value.trim().length > 0);
+}
+
 function moneyDelta(cents: number) {
   const sign = cents >= 0 ? "+" : "-";
   return `${sign}$${(Math.abs(cents) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
+}
+
+function capitalFitLabel(value: string) {
+  if (value === "stretch") return "cash-stretch";
+  if (value === "unknown") return "setup-unknown";
+  return value;
+}
+
+function decisionActionLabel(value: string) {
+  return value.replaceAll("_", " ");
 }

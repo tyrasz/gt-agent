@@ -25,19 +25,19 @@ describe("RestLlmPlanner", () => {
     const fastTimeouts = { openai: 60_000, anthropic: 30_000, gemini: 30_000 };
     const largeTimeouts = { openai: 720_000, anthropic: 720_000, gemini: 720_000 };
 
-    expect(isLargeModel("openai", "gpt-5.5")).toBe(true);
-    expect(isLargeModel("openai", "gpt-5.5-pro")).toBe(true);
-    expect(isLargeModel("openai", "gpt-5.4")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5-pro")).toBe(true);
+    expect(isLargeModel("openai", "gpt-5.1")).toBe(true);
     expect(isLargeModel("anthropic", "claude-opus-4-7")).toBe(true);
     expect(isLargeModel("anthropic", "claude-sonnet-4-6")).toBe(true);
     expect(isLargeModel("gemini", "gemini-2.5-pro")).toBe(true);
-    expect(isLargeModel("openai", "gpt-5.5-mini")).toBe(false);
+    expect(isLargeModel("openai", "gpt-4.1-mini")).toBe(false);
     expect(isLargeModel("openai", "gpt-4.1-mini")).toBe(false);
     expect(isLargeModel("gemini", "gemini-2.5-flash")).toBe(false);
     expect(isLargeModel("anthropic", "claude-haiku-4-5")).toBe(false);
 
-    expect(resolveProviderTimeoutMs("openai", "gpt-5.5", fastTimeouts, largeTimeouts)).toBe(720_000);
-    expect(resolveProviderTimeoutMs("openai", "gpt-5.5-mini", fastTimeouts, largeTimeouts)).toBe(60_000);
+    expect(resolveProviderTimeoutMs("openai", "gpt-5", fastTimeouts, largeTimeouts)).toBe(720_000);
+    expect(resolveProviderTimeoutMs("openai", "gpt-4.1-mini", fastTimeouts, largeTimeouts)).toBe(60_000);
   });
 
   it("retries once when provider JSON fails schema validation", async () => {
@@ -85,7 +85,7 @@ describe("RestLlmPlanner", () => {
 
     await expect(planner.generateStructuredPlan({
       provider: "openai",
-      model: "gpt-5.5-mini",
+      model: "gpt-4.1-mini",
       providerApiKey: "sk-test",
       planningContext: context,
       snapshot,
@@ -106,11 +106,11 @@ describe("RestLlmPlanner", () => {
     });
 
     const snapshot = makeSnapshot();
-    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5.5");
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5");
 
     await expect(planner.generateStructuredPlan({
       provider: "openai",
-      model: "gpt-5.5",
+      model: "gpt-5",
       providerApiKey: "sk-test",
       planningContext: context,
       snapshot,
@@ -179,6 +179,7 @@ describe("RestLlmPlanner", () => {
     expect(promptBody).toContain("The player request to answer first");
     expect(promptBody).toContain("Focus on cargo bottlenecks before my next login.");
     expect(promptBody).toContain("Money values from GT raw fields are integer cents.");
+    expect(promptBody).toContain("Blocked profitability targets are context only.");
     const compactPayload = JSON.parse(promptBody.slice(promptBody.indexOf("{\"planningContext\"")));
     expect(compactPayload.snapshotSummary.company.cashCents).toBe(5_000_000);
     expect(compactPayload.snapshotSummary.company.cashDisplay).toBe("$50,000");
@@ -186,11 +187,16 @@ describe("RestLlmPlanner", () => {
     expect(compactPayload.deterministicSitrep.situation.cash.currentCents).toBe(5_000_000);
     expect(compactPayload.deterministicSitrep.situation.cash.currentDisplay).toBe("$50,000");
     expect(compactPayload.deterministicSitrep.situation.cash.current).toBeUndefined();
+    expect(compactPayload.deterministicSitrep.decisionPanel.actions.length).toBeGreaterThan(0);
+    expect(compactPayload.deterministicSitrep.decisionPanel.actions[0]).toHaveProperty("preparedCommands");
     expect(compactPayload.deterministicSitrep.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(compactPayload.deterministicSitrep.projections.bands.length).toBeGreaterThan(0);
     expect(compactPayload.deterministicSitrep.profitability.companyFit.length).toBeGreaterThan(0);
+    expect(compactPayload.deterministicSitrep.profitability.blockedTargets.length).toBeGreaterThan(0);
     expect(compactPayload.deterministicSitrep.profitability.globalTargets.length).toBeGreaterThan(0);
     expect(compactPayload.deterministicSitrep.profitability.companyFit[0].profitPerHourDisplay).toContain("/h");
+    expect(compactPayload.deterministicSitrep.profitability.blockedTargets[0]).toHaveProperty("knownMinimumCapitalDisplay");
+    expect(compactPayload.deterministicSitrep.profitability.blockedTargets[0]).toHaveProperty("unpricedRequirements");
     expect(compactPayload.deterministicSitrep.topActionPlans.length).toBeGreaterThan(0);
     expect(compactPayload.deterministicSitrep.topMarketSignals.length).toBeGreaterThan(0);
     expect(compactPayload.rawSnapshot).toBeUndefined();
@@ -212,11 +218,11 @@ describe("RestLlmPlanner", () => {
     });
 
     const snapshot = makeSnapshot();
-    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5.5");
+    const deterministicSitrep = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5");
 
     const result = await planner.generateStructuredPlan({
       provider: "openai",
-      model: "gpt-5.5",
+      model: "gpt-5",
       providerApiKey: "sk-test",
       planningContext: context,
       snapshot,

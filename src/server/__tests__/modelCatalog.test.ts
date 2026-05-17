@@ -22,9 +22,9 @@ describe("ModelCatalogService", () => {
         return Response.json({
           data: [
             { id: "text-embedding-3-large" },
-            { id: "gpt-5.5-mini" },
-            { id: "gpt-5.4-mini" },
-            { id: "gpt-5.5" },
+            { id: "gpt-4.1-mini" },
+            { id: "gpt-4o-mini" },
+            { id: "gpt-5" },
             { id: "gpt-image-1" }
           ]
         });
@@ -33,8 +33,8 @@ describe("ModelCatalogService", () => {
 
     const catalog = await service.listModels(session, "openai", true);
 
-    expect(catalog.defaultModel).toBe("gpt-5.5-mini");
-    expect(catalog.models.map((model) => model.id)).toEqual(["gpt-5.5-mini", "gpt-5.4-mini", "gpt-5.5"]);
+    expect(catalog.defaultModel).toBe("gpt-4.1-mini");
+    expect(catalog.models.map((model) => model.id)).toEqual(["gpt-4.1-mini", "gpt-4o-mini", "gpt-5"]);
     expect(catalog.warnings).toEqual([]);
   });
 
@@ -42,16 +42,16 @@ describe("ModelCatalogService", () => {
     const service = new ModelCatalogService({
       fetchImpl: async () => Response.json({
         data: [
-          { id: "gpt-5.5" },
-          { id: "gpt-5.4-mini" }
+          { id: "gpt-5" },
+          { id: "gpt-4o-mini" }
         ]
       })
     });
 
     const catalog = await service.listModels(session, "openai", true);
 
-    expect(catalog.defaultModel).toBe("gpt-5.4-mini");
-    expect(catalog.models.map((model) => model.id)).toContain("gpt-5.5");
+    expect(catalog.defaultModel).toBe("gpt-4o-mini");
+    expect(catalog.models.map((model) => model.id)).toContain("gpt-5");
   });
 
   it("filters Anthropic models and keeps Claude text models", async () => {
@@ -106,7 +106,7 @@ describe("ModelCatalogService", () => {
 
     const catalog = await service.listModels(session, "openai", true);
 
-    expect(catalog.defaultModel).toBe("gpt-5.5-mini");
+    expect(catalog.defaultModel).toBe("gpt-4.1-mini");
     expect(catalog.models[0].source).toBe("fallback");
     expect(catalog.warnings[0]).toContain("timed out");
   });
@@ -140,7 +140,7 @@ describe("ModelCatalogService", () => {
     const service = new ModelCatalogService({
       fetchImpl: async () => {
         calls += 1;
-        return Response.json({ data: [{ id: "gpt-5.5-mini" }] });
+        return Response.json({ data: [{ id: "gpt-4.1-mini" }] });
       }
     });
 

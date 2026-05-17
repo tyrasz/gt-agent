@@ -8,11 +8,11 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
     await route.fulfill({
       json: {
         provider: "openai",
-        defaultModel: "gpt-5.5-mini",
+        defaultModel: "gpt-4.1-mini",
         models: [
-          { id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" },
-          { id: "gpt-5.4-mini", label: "gpt-5.4-mini", source: "provider" },
-          { id: "gpt-5.5", label: "gpt-5.5", source: "provider" }
+          { id: "gpt-4.1-mini", label: "gpt-4.1-mini", source: "provider" },
+          { id: "gpt-4o-mini", label: "gpt-4o-mini", source: "provider" },
+          { id: "gpt-5", label: "gpt-5", source: "provider" }
         ],
         warnings: []
       }
@@ -20,14 +20,14 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   });
   await page.route("**/api/agent/sitrep", async (route) => {
     const payload = route.request().postDataJSON();
-    expect(payload.model).toBe("gpt-5.5-mini");
+    expect(payload.model).toBe("gpt-4.1-mini");
     expect(payload.planningContext.userPrompt).toContain("restock");
     expect(payload.refresh).toEqual({ forceCompany: true, forceMarket: true, forceGameData: false });
     await route.fulfill({
       json: {
         generatedAt: new Date().toISOString(),
         provider: "openai",
-        model: "gpt-5.5-mini",
+        model: "gpt-4.1-mini",
         summary: "Restock inputs and review exchange pricing.",
         decisionBrief: {
           thesis: "Restock Iron Ore first, then inspect whether the next CV move should be production capacity or market repricing.",
@@ -54,6 +54,77 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
           constraints: ["GT Agent is read-only.", "Cash and prices must be checked live."],
           inspectNext: ["Open base plans.", "Refresh Iron Ore market depth."],
           confidence: "medium"
+        },
+        decisionPanel: {
+          summary: "2 contract/exchange decisions ranked (1 contract, 1 exchange), led by Fulfill Iron Ore Rush.",
+          warnings: [],
+          actions: [
+            {
+              id: "contract-ore-rush",
+              kind: "contract",
+              action: "fulfill_contract",
+              title: "Fulfill Iron Ore Rush",
+              priority: "high",
+              score: 82,
+              confidence: "high",
+              expectedValue: 1000000,
+              cashImpactPct: 0,
+              deadline: "2030-01-01T00:00:00.000Z",
+              requirements: [
+                {
+                  matId: 1,
+                  matName: "Iron Ore",
+                  quantity: 10,
+                  availableQty: 20,
+                  shortageQty: 0,
+                  estimatedCost: 0
+                }
+              ],
+              blockers: [],
+              evidence: ["Payout: $10,000.", "Visible inventory covers parsed requirements."],
+              preparedCommands: [
+                {
+                  type: "review",
+                  title: "Review contract: Iron Ore Rush",
+                  executable: false,
+                  payload: {},
+                  steps: ["Open contract Iron Ore Rush.", "Confirm payout and requirements."]
+                }
+              ]
+            },
+            {
+              id: "exchange-buy-1",
+              kind: "exchange",
+              action: "buy_material",
+              title: "Buy Iron Ore",
+              priority: "medium",
+              score: 58,
+              confidence: "medium",
+              expectedValue: 100000,
+              cashImpactPct: 8,
+              requirements: [
+                {
+                  matId: 1,
+                  matName: "Iron Ore",
+                  quantity: 100,
+                  availableQty: 20,
+                  shortageQty: 100,
+                  estimatedCost: 400000
+                }
+              ],
+              blockers: [],
+              evidence: ["$40 current vs $50 recent average (-20%).", "100 net needed by current production/wishlist demand."],
+              preparedCommands: [
+                {
+                  type: "buy_material",
+                  title: "Check buy quantity for Iron Ore",
+                  executable: false,
+                  payload: {},
+                  steps: ["Open Iron Ore.", "Check quantity.", "Buy only if live depth matches."]
+                }
+              ]
+            }
+          ]
         },
         actionPlans: [
           {
@@ -106,6 +177,8 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
             profitPerHour: 200000,
             marginPct: 50,
             profitabilityTag: "company-fit",
+            capitalFit: "affordable",
+            setupDistance: "ready",
             whyNow: "Use existing production fit if live inputs and output prices still support $2,000/h.",
             expectedBenefit: "$2,000/h estimated net value at 50% margin.",
             costSummary: "No major setup gap visible from the read-only snapshot.",
@@ -136,7 +209,11 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               liquidityScore: 55,
               priceConfidence: "high",
               companyFit: "active",
-              setupCostEstimate: 100000,
+              capitalFit: "affordable",
+              setupDistance: "ready",
+              setupCostEstimate: 0,
+              firstPracticalStep: "Run or reprice Iron Bar using existing production fit.",
+              missingPrerequisites: [],
               setupGaps: [],
               warnings: []
             },
@@ -159,7 +236,12 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               liquidityScore: 25,
               priceConfidence: "medium",
               companyFit: "target",
+              capitalFit: "stretch",
+              setupDistance: "unreachable_now",
               setupCostEstimate: 700000,
+              cashImpactPct: 38,
+              firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+              missingPrerequisites: ["Build or acquire Toolworks."],
               setupGaps: ["Build or acquire Toolworks."],
               warnings: ["Tools uses CP fallback for output price."]
             }
@@ -177,8 +259,79 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               confidence: "medium",
               profitPerHour: 200000,
               marginPct: 50,
+              capitalFit: "affordable",
+              setupDistance: "ready",
+              setupCostEstimate: 0,
+              firstPracticalStep: "Run or reprice Iron Bar using existing production fit.",
+              missingPrerequisites: [],
               rationale: ["$2,000/h estimated net value.", "100% one-run input coverage."],
               blockers: []
+            }
+          ],
+          nextSteps: [],
+          aspirationalTargets: [
+            {
+              id: "profit-global-2001",
+              kind: "restructure_toward",
+              recipeId: 2001,
+              title: "Restructure toward Tools",
+              recommendation: "Treat Tools as aspirational until capital and setup blockers are cleared.",
+              horizonId: "d7",
+              horizonLabel: "7 Days",
+              score: 88,
+              confidence: "medium",
+              profitPerHour: 480000,
+              marginPct: 400,
+              capitalFit: "stretch",
+              setupDistance: "unreachable_now",
+              setupCostEstimate: 700000,
+              cashImpactPct: 38,
+              firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+              missingPrerequisites: ["Build or acquire Toolworks."],
+              rationale: ["$4,800/h estimated net production value.", "Requires Toolworks."],
+              blockers: ["Build or acquire Toolworks."]
+            }
+          ],
+          blockedTargets: [
+            {
+              id: "profit-global-9001",
+              kind: "restructure_toward",
+              recipeId: 9001,
+              title: "Restructure toward Uranium Ore",
+              recommendation: "Keep Uranium Ore as a blocked long-term reference until planet/resource, tech, and capital blockers are cleared.",
+              horizonId: "d7",
+              horizonLabel: "7 Days",
+              score: 35,
+              confidence: "low",
+              profitPerHour: 12000000,
+              capitalFit: "blocked",
+              setupDistance: "unreachable_now",
+              resourceAccess: "blocked",
+              planetRequirement: "Requires a planet/base with Uranium Ore resource access.",
+              techRequirement: "Requires research level 15 before Uranium Mine can be treated as available.",
+              setupCostCompleteness: "partial",
+              setupCostEstimate: 100000000,
+              knownMinimumCapital: 119500000,
+              knownCapitalGap: 114500000,
+              cashImpactPct: 2000,
+              firstPracticalStep: "Do not plan Uranium Ore as a next move until blocked prerequisites are resolved. Known minimum capital before unpriced gaps is $1,195,000.",
+              missingPrerequisites: ["Confirm planet/resource access for Uranium Ore.", "Confirm research requirement 15."],
+              unpricedRequirements: [
+                "New planet/base/resource access for Uranium Ore is not priced from the current snapshot.",
+                "Research path cost for requirement 15 is not priced from the current snapshot."
+              ],
+              blockingReasons: [
+                "Requires a planet/base with Uranium Ore resource access.",
+                "Requires research level 15 before Uranium Mine can be treated as available."
+              ],
+              rationale: [
+                "$120,000/h estimated net production value.",
+                "Known minimum capital is $1,195,000 before unpriced gaps."
+              ],
+              blockers: [
+                "Requires a planet/base with Uranium Ore resource access.",
+                "Requires research level 15 before Uranium Mine can be treated as available."
+              ]
             }
           ],
           globalTargets: [
@@ -187,15 +340,61 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               kind: "restructure_toward",
               recipeId: 2001,
               title: "Restructure toward Tools",
-              recommendation: "Treat Tools as a long-horizon target if live margins persist.",
+              recommendation: "Treat Tools as aspirational until capital and setup blockers are cleared.",
               horizonId: "d7",
               horizonLabel: "7 Days",
               score: 88,
               confidence: "medium",
               profitPerHour: 480000,
               marginPct: 400,
+              capitalFit: "stretch",
+              setupDistance: "unreachable_now",
+              setupCostEstimate: 700000,
+              cashImpactPct: 38,
+              firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+              missingPrerequisites: ["Build or acquire Toolworks."],
               rationale: ["$4,800/h estimated net production value.", "Requires Toolworks."],
               blockers: ["Build or acquire Toolworks."]
+            },
+            {
+              id: "profit-global-9001",
+              kind: "restructure_toward",
+              recipeId: 9001,
+              title: "Restructure toward Uranium Ore",
+              recommendation: "Keep Uranium Ore as a blocked long-term reference until planet/resource, tech, and capital blockers are cleared.",
+              horizonId: "d7",
+              horizonLabel: "7 Days",
+              score: 35,
+              confidence: "low",
+              profitPerHour: 12000000,
+              capitalFit: "blocked",
+              setupDistance: "unreachable_now",
+              resourceAccess: "blocked",
+              planetRequirement: "Requires a planet/base with Uranium Ore resource access.",
+              techRequirement: "Requires research level 15 before Uranium Mine can be treated as available.",
+              setupCostCompleteness: "partial",
+              setupCostEstimate: 100000000,
+              knownMinimumCapital: 119500000,
+              knownCapitalGap: 114500000,
+              cashImpactPct: 2000,
+              firstPracticalStep: "Do not plan Uranium Ore as a next move until blocked prerequisites are resolved. Known minimum capital before unpriced gaps is $1,195,000.",
+              missingPrerequisites: ["Confirm planet/resource access for Uranium Ore.", "Confirm research requirement 15."],
+              unpricedRequirements: [
+                "New planet/base/resource access for Uranium Ore is not priced from the current snapshot.",
+                "Research path cost for requirement 15 is not priced from the current snapshot."
+              ],
+              blockingReasons: [
+                "Requires a planet/base with Uranium Ore resource access.",
+                "Requires research level 15 before Uranium Mine can be treated as available."
+              ],
+              rationale: [
+                "$120,000/h estimated net production value.",
+                "Known minimum capital is $1,195,000 before unpriced gaps."
+              ],
+              blockers: [
+                "Requires a planet/base with Uranium Ore resource access.",
+                "Requires research level 15 before Uranium Mine can be treated as available."
+              ]
             }
           ],
           chains: [
@@ -215,6 +414,8 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
                   netEstimatePerHour: 200000,
                   marginPct: 50,
                   companyFit: "active",
+                  capitalFit: "affordable",
+                  setupDistance: "ready",
                   setupGaps: []
                 },
                 {
@@ -226,6 +427,8 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
                   netEstimatePerHour: 480000,
                   marginPct: 400,
                   companyFit: "target",
+                  capitalFit: "stretch",
+                  setupDistance: "unreachable_now",
                   setupGaps: ["Build or acquire Toolworks."]
                 }
               ],
@@ -237,7 +440,13 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               liquidityScore: 25,
               setupGaps: ["Build or acquire Toolworks."],
               companyFit: "target",
-              confidence: "medium",
+              capitalFit: "stretch",
+              setupDistance: "unreachable_now",
+              setupCostEstimate: 700000,
+              cashImpactPct: 38,
+              firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+              missingPrerequisites: ["Build or acquire Toolworks."],
+              confidence: "low",
               warnings: []
             }
           ],
@@ -255,6 +464,12 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               profitPerHour: 550000,
               marginPct: 106,
               inputCoveragePct: 100,
+              capitalFit: "stretch",
+              setupDistance: "unreachable_now",
+              setupCostEstimate: 700000,
+              cashImpactPct: 38,
+              firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+              missingPrerequisites: ["Build or acquire Toolworks."],
               rationale: ["$5,500/h chain net estimate.", "2 linked production steps."],
               blockers: ["Build or acquire Toolworks."]
             }
@@ -325,6 +540,12 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
             profitPerHour: 550000,
             marginPct: 106,
             inputCoveragePct: 100,
+            capitalFit: "stretch",
+            setupDistance: "unreachable_now",
+            setupCostEstimate: 700000,
+            cashImpactPct: 38,
+            firstPracticalStep: "Treat Tools as a stretch; validate setup cost before spending.",
+            missingPrerequisites: ["Build or acquire Toolworks."],
             rationale: ["$5,500/h chain net estimate.", "2 linked production steps."],
             blockers: ["Build or acquire Toolworks."]
           }
@@ -478,7 +699,7 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   await page.getByRole("button", { name: "Start Session" }).click();
 
   await expect(page.getByText("Session active")).toBeVisible();
-  await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5-mini");
+  await expect(page.getByLabel("Model")).toHaveValue("gpt-4.1-mini");
   await page.getByLabel("Command prompt").fill("Give me a restock-focused sitrep before my next login.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByRole("heading", { name: "Restock Iron Ore", exact: true })).toBeVisible();
@@ -497,11 +718,26 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   await expect(page.getByText("Why this is ranked:").first()).toBeVisible();
   await expect(page.getByText("84")).toBeVisible();
   await expect(page.getByText("$2,000/h", { exact: true }).first()).toBeVisible();
+  await expect(page.getByText("affordable").first()).toBeVisible();
+  await page.getByRole("button", { name: "Decisions" }).click();
+  await expect(page.getByRole("heading", { name: "Fulfill Iron Ore Rush", exact: true })).toBeVisible();
+  await expect(page.getByText("contract / fulfill contract")).toBeVisible();
+  await expect(page.getByText("Need 10", { exact: true })).toBeVisible();
+  await expect(page.getByText("Review contract: Iron Ore Rush")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Raw Snapshot" })).toBeVisible();
   await page.getByRole("button", { name: "Profitability" }).click();
   await expect(page.getByRole("heading", { name: "Company-fit now" })).toBeVisible();
   await expect(page.getByText("Run profitable Iron Bar")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Global targets to restructure toward" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Next feasible steps" })).toBeVisible();
+  await expect(page.getByText("No affordable progression step cleared the current cash-risk gate.")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Aspirational targets", exact: true })).toBeVisible();
   await expect(page.getByText("Restructure toward Tools", { exact: true })).toBeVisible();
+  await expect(page.getByText("cash-stretch").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Blocked long-term references" })).toBeVisible();
+  await expect(page.getByText("Restructure toward Uranium Ore", { exact: true })).toBeVisible();
+  await expect(page.getByText("Known minimum").first()).toBeVisible();
+  await expect(page.getByText("$1,195,000", { exact: true })).toBeVisible();
+  await expect(page.getByText("New planet/base/resource access for Uranium Ore is not priced from the current snapshot.")).toBeVisible();
   await page.getByRole("button", { name: "Chains" }).click();
   await expect(page.getByText("Chain optimizer")).toBeVisible();
   await expect(page.getByText("Iron Bar -> Tools")).toBeVisible();
@@ -521,10 +757,10 @@ test("full OpenAI model remains selectable", async ({ page }) => {
     await route.fulfill({
       json: {
         provider: "openai",
-        defaultModel: "gpt-5.5-mini",
+        defaultModel: "gpt-4.1-mini",
         models: [
-          { id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" },
-          { id: "gpt-5.5", label: "gpt-5.5", source: "provider" }
+          { id: "gpt-4.1-mini", label: "gpt-4.1-mini", source: "provider" },
+          { id: "gpt-5", label: "gpt-5", source: "provider" }
         ],
         warnings: []
       }
@@ -532,12 +768,12 @@ test("full OpenAI model remains selectable", async ({ page }) => {
   });
   await page.route("**/api/agent/sitrep", async (route) => {
     const payload = route.request().postDataJSON();
-    expect(payload.model).toBe("gpt-5.5");
+    expect(payload.model).toBe("gpt-5");
     await route.fulfill({
       json: {
         generatedAt: new Date().toISOString(),
         provider: "openai",
-        model: "gpt-5.5",
+        model: "gpt-5",
         summary: "Full model was selected explicitly.",
         actionPlans: [],
         marketSignals: [],
@@ -555,9 +791,9 @@ test("full OpenAI model remains selectable", async ({ page }) => {
   await page.getByLabel("OpenAI API key").fill("sk-test-key");
   await page.getByRole("button", { name: "Start Session" }).click();
 
-  await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5-mini");
+  await expect(page.getByLabel("Model")).toHaveValue("gpt-4.1-mini");
   await expect(page.getByText("Fast OpenAI models are selected by default.")).toBeVisible();
-  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5.5");
+  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5");
   await expect(page.getByText("Large model selected. This can wait up to 12 minutes.")).toBeVisible();
   await page.getByLabel("Command prompt").fill("Use the full model for this plan.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
@@ -572,8 +808,8 @@ test("CV growth prompt renders decision alternatives and inspection checklist", 
     await route.fulfill({
       json: {
         provider: "openai",
-        defaultModel: "gpt-5.5-mini",
-        models: [{ id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" }],
+        defaultModel: "gpt-4.1-mini",
+        models: [{ id: "gpt-4.1-mini", label: "gpt-4.1-mini", source: "provider" }],
         warnings: []
       }
     });
@@ -585,7 +821,7 @@ test("CV growth prompt renders decision alternatives and inspection checklist", 
       json: {
         generatedAt: new Date().toISOString(),
         provider: "openai",
-        model: "gpt-5.5-mini",
+        model: "gpt-4.1-mini",
         summary: "CV growth needs a prepared path, not a blind spend.",
         decisionBrief: {
           thesis: "Increase CV by comparing deeper specialization against diversification before committing cash.",
@@ -695,10 +931,10 @@ test("LLM timeout error remains visible without clearing the dashboard", async (
     await route.fulfill({
       json: {
         provider: "openai",
-        defaultModel: "gpt-5.5-mini",
+        defaultModel: "gpt-4.1-mini",
         models: [
-          { id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" },
-          { id: "gpt-5.5", label: "gpt-5.5", source: "provider" }
+          { id: "gpt-4.1-mini", label: "gpt-4.1-mini", source: "provider" },
+          { id: "gpt-5", label: "gpt-5", source: "provider" }
         ],
         warnings: []
       }
@@ -711,7 +947,7 @@ test("LLM timeout error remains visible without clearing the dashboard", async (
         json: {
           generatedAt: new Date().toISOString(),
           provider: "openai",
-          model: "gpt-5.5-mini",
+          model: "gpt-4.1-mini",
           summary: "Fast model generated the current dashboard.",
           actionPlans: [],
           marketSignals: [],
@@ -729,7 +965,7 @@ test("LLM timeout error remains visible without clearing the dashboard", async (
       status: 504,
       json: {
         error: "OpenAI did not respond within 12m. Try a faster model or another provider.",
-        details: { provider: "openai", model: "gpt-5.5", timeoutMs: 720000, timeout: "12m" }
+        details: { provider: "openai", model: "gpt-5", timeoutMs: 720000, timeout: "12m" }
       }
     });
   });
@@ -743,7 +979,7 @@ test("LLM timeout error remains visible without clearing the dashboard", async (
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByText("Fast model generated the current dashboard.")).toBeVisible();
 
-  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5.5");
+  await page.locator(".console-panel .control-grid select").nth(1).selectOption("gpt-5");
   await expect(page.getByText("Large model selected. This can wait up to 12 minutes.")).toBeVisible();
   await page.getByLabel("Command prompt").fill("Try the large model.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
@@ -763,7 +999,7 @@ test("model catalog failure keeps fallback models available", async ({ page }) =
       json: {
         generatedAt: new Date().toISOString(),
         provider: "openai",
-        model: "gpt-5.5-mini",
+        model: "gpt-4.1-mini",
         summary: "Fallback model still generated a sitrep.",
         actionPlans: [],
         marketSignals: [],
@@ -782,7 +1018,7 @@ test("model catalog failure keeps fallback models available", async ({ page }) =
   await page.getByRole("button", { name: "Start Session" }).click();
 
   await expect(page.getByText("Could not load provider models.")).toBeVisible();
-  await expect(page.getByLabel("Model")).toHaveValue("gpt-5.5-mini");
+  await expect(page.getByLabel("Model")).toHaveValue("gpt-4.1-mini");
   await page.getByLabel("Command prompt").fill("Give me a fallback model sitrep.");
   await page.getByRole("button", { name: "Generate Sitrep" }).click();
   await expect(page.getByText("Fallback model still generated a sitrep.")).toBeVisible();
@@ -796,8 +1032,8 @@ test("custom model override is sent with the prompt request", async ({ page }) =
     await route.fulfill({
       json: {
         provider: "openai",
-        defaultModel: "gpt-5.5-mini",
-        models: [{ id: "gpt-5.5-mini", label: "gpt-5.5-mini", source: "provider" }],
+        defaultModel: "gpt-4.1-mini",
+        models: [{ id: "gpt-4.1-mini", label: "gpt-4.1-mini", source: "provider" }],
         warnings: []
       }
     });
@@ -828,6 +1064,7 @@ test("custom model override is sent with the prompt request", async ({ page }) =
   await page.getByLabel("OpenAI API key").fill("sk-test-key");
   await page.getByRole("button", { name: "Start Session" }).click();
 
+  await expect(page.getByLabel("Model")).toHaveValue("gpt-4.1-mini");
   await page.getByLabel("Model").selectOption("__custom");
   await page.getByRole("textbox", { name: "Custom model ID" }).fill("gpt-experimental-sitrep");
   await page.getByLabel("Command prompt").fill("Use my custom model for this cargo plan.");

@@ -49,7 +49,7 @@ export function priorityFromScore(score: number): ActionPlan["priority"] {
   return "low";
 }
 
-export function confidenceFromScore(score: number): ActionPlan["confidence"] {
+export function confidenceFromScore(score: number): NonNullable<ActionPlan["confidence"]> {
   if (score >= 70) return "high";
   if (score >= 45) return "medium";
   return "low";

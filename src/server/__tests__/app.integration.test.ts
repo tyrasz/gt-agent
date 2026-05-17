@@ -71,7 +71,11 @@ describe("API integration", () => {
     expect(body.rawSnapshot.company.name).toBe("Stellar Foundry");
     expect(body.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(body.projections.bands).toHaveLength(4);
+    expect(body.decisionPanel.actions.length).toBeGreaterThan(0);
+    expect(body.decisionPanel.actions.every((action: { preparedCommands: Array<{ executable: boolean }> }) => action.preparedCommands.every((command) => command.executable === false))).toBe(true);
     expect(body.profitability.companyFit.length).toBeGreaterThan(0);
+    expect(body.profitability.nextSteps).toBeDefined();
+    expect(body.profitability.blockedTargets.length).toBeGreaterThan(0);
     expect(body.profitability.chains.length).toBeGreaterThan(0);
     expect(body.chainOpportunities.length).toBeGreaterThan(0);
     expect(body.history.entries).toHaveLength(1);
@@ -181,8 +185,8 @@ describe("API integration", () => {
       modelCatalog: {
         listModels: async () => ({
           provider: "openai",
-          defaultModel: "gpt-5.5",
-          models: [{ id: "gpt-5.5", label: "gpt-5.5", source: "provider" }],
+          defaultModel: "gpt-5",
+          models: [{ id: "gpt-5", label: "gpt-5", source: "provider" }],
           warnings: []
         })
       } as any
@@ -210,7 +214,7 @@ describe("API integration", () => {
     });
 
     expect(models.statusCode).toBe(200);
-    expect(models.body).toContain("gpt-5.5");
+    expect(models.body).toContain("gpt-5");
     expect(models.body).not.toContain("sk-secret-key");
   });
 
@@ -249,7 +253,8 @@ describe("API integration", () => {
           output_text: JSON.stringify({
             summary: "LLM summary focused on restocking.",
             decisionBriefNarrative: {
-              thesis: "LLM thesis still follows the deterministic brief."
+              thesis: "LLM thesis still follows the deterministic brief.",
+              recommendedPath: ["1. Build Tools immediately even though it is blocked."]
             },
             actionPlanNarratives: [
               {
@@ -278,17 +283,18 @@ describe("API integration", () => {
       headers: { cookie: String(keys.headers["set-cookie"]) },
       payload: {
         provider: "openai",
-        model: "gpt-5.5",
+        model: "gpt-5",
         planningContext: context
       }
     });
 
     const body = sitrep.json();
-    const deterministic = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5.5");
+    const deterministic = buildDeterministicSitrep(snapshot, context, "openai", "gpt-5");
     expect(sitrep.statusCode).toBe(200);
     expect(body.diagnostics.source).toBe("llm");
     expect(body.summary).toBe("LLM summary focused on restocking.");
     expect(body.decisionBrief.thesis).toBe("LLM thesis still follows the deterministic brief.");
+    expect(body.decisionBrief.recommendedPath.join(" ")).not.toContain("Build Tools immediately");
     expect(body.decisionBrief.confidence).toBe(deterministic.decisionBrief.confidence);
     expect(body.actionPlans).toHaveLength(deterministic.actionPlans.length);
     expect(body.actionPlans[0].score).toBeTypeOf("number");
@@ -331,7 +337,7 @@ describe("API integration", () => {
       headers: { cookie: String(keys.headers["set-cookie"]) },
       payload: {
         provider: "openai",
-        model: "gpt-5.5",
+        model: "gpt-5",
         planningContext: context
       }
     });
@@ -340,7 +346,7 @@ describe("API integration", () => {
     expect(sitrep.statusCode).toBe(502);
     expect(body.error).toContain("Provider returned JSON that did not match the LLM draft schema.");
     expect(body.error).toContain("Try another model or provider.");
-    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5" });
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5" });
     expect(body.diagnostics).toBeUndefined();
     expect(body.marketSignals).toBeUndefined();
   });
@@ -379,7 +385,7 @@ describe("API integration", () => {
       headers: { cookie: String(keys.headers["set-cookie"]) },
       payload: {
         provider: "openai",
-        model: "gpt-5.5",
+        model: "gpt-5",
         planningContext: context
       }
     });
@@ -387,7 +393,7 @@ describe("API integration", () => {
     const body = sitrep.json();
     expect(sitrep.statusCode).toBe(504);
     expect(body.error).toContain("OpenAI did not respond within 5ms. Try a faster model or another provider.");
-    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5", timeoutMs: 5, timeout: "5ms" });
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5", timeoutMs: 5, timeout: "5ms" });
     expect(body.diagnostics).toBeUndefined();
   });
 
@@ -425,7 +431,7 @@ describe("API integration", () => {
       headers: { cookie: String(keys.headers["set-cookie"]) },
       payload: {
         provider: "openai",
-        model: "gpt-5.5-mini",
+        model: "gpt-4.1-mini",
         planningContext: context
       }
     });
@@ -433,6 +439,6 @@ describe("API integration", () => {
     const body = sitrep.json();
     expect(sitrep.statusCode).toBe(504);
     expect(body.error).toContain("OpenAI did not respond within 5ms. Try a faster model or another provider.");
-    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-5.5-mini", timeoutMs: 5, timeout: "5ms" });
+    expect(body.details).toMatchObject({ provider: "openai", model: "gpt-4.1-mini", timeoutMs: 5, timeout: "5ms" });
   });
 });

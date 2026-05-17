@@ -129,7 +129,7 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
         });
       }
       if (error instanceof LlmProviderError) {
-        const statusCode = error.status === 401 || error.status === 403 ? 400 : 502;
+        const statusCode = error.status === 401 || error.status === 403 || error.status === 404 ? 400 : 502;
         const suffix = error.message.includes("Try another model or provider.") ? "" : " Try another model or provider.";
         return reply.code(statusCode).send({
           error: `${error.message}${suffix}`,
