@@ -74,6 +74,8 @@ export function buildDeterministicSitrep(
     projections: analysis.projections,
     actionPlans: analysis.actionPlans,
     profitability: analysis.profitability,
+    chainOpportunities: analysis.profitability.chainOpportunities,
+    trendSignals: [],
     marketSignals: analysis.marketSignals,
     stockoutRisks: analysis.stockoutRisks,
     expansionCandidates: analysis.expansionCandidates,

@@ -198,9 +198,137 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
               blockers: ["Build or acquire Toolworks."]
             }
           ],
+          chains: [
+            {
+              id: "chain-1001-2001",
+              title: "Iron Bar -> Tools",
+              recipeIds: [1001, 2001],
+              outputMatId: 3,
+              outputMatName: "Tools",
+              steps: [
+                {
+                  recipeId: 1001,
+                  recipeName: "Iron Bar recipe",
+                  outputMatId: 2,
+                  outputMatName: "Iron Bar",
+                  buildingName: "Smelter",
+                  netEstimatePerHour: 200000,
+                  marginPct: 50,
+                  companyFit: "active",
+                  setupGaps: []
+                },
+                {
+                  recipeId: 2001,
+                  recipeName: "Tools recipe",
+                  outputMatId: 3,
+                  outputMatName: "Tools",
+                  buildingName: "Toolworks",
+                  netEstimatePerHour: 480000,
+                  marginPct: 400,
+                  companyFit: "target",
+                  setupGaps: ["Build or acquire Toolworks."]
+                }
+              ],
+              totalInputCostPerHour: 520000,
+              totalOutputValuePerHour: 600000,
+              totalNetProfitPerHour: 550000,
+              marginPct: 106,
+              inputCoveragePct: 100,
+              liquidityScore: 25,
+              setupGaps: ["Build or acquire Toolworks."],
+              companyFit: "target",
+              confidence: "medium",
+              warnings: []
+            }
+          ],
+          chainOpportunities: [
+            {
+              id: "chain-opportunity-restructure_chain-chain-1001-2001",
+              kind: "restructure_chain",
+              chainId: "chain-1001-2001",
+              title: "Restructure toward Tools chain",
+              recommendation: "Use Tools as a long-horizon chain target if setup gaps and liquidity checks stay favorable.",
+              horizonId: "d7",
+              horizonLabel: "7 Days",
+              score: 76,
+              confidence: "medium",
+              profitPerHour: 550000,
+              marginPct: 106,
+              inputCoveragePct: 100,
+              rationale: ["$5,500/h chain net estimate.", "2 linked production steps."],
+              blockers: ["Build or acquire Toolworks."]
+            }
+          ],
           assumptions: ["Profitability uses current exchange prices when available and material CP as fallback."],
           warnings: []
         },
+        history: {
+          lastRunAt: new Date().toISOString(),
+          entries: [
+            {
+              id: "hist-1",
+              generatedAt: new Date().toISOString(),
+              fetchedAt: new Date().toISOString(),
+              companyName: "Test Co",
+              cash: 5000000,
+              companyValue: 20000000,
+              topActionTitle: "Restock Iron Ore",
+              topActionIds: ["restock-1"],
+              highPriorityCount: 1,
+              stockoutMatIds: [1],
+              stockoutMatNames: ["Iron Ore"],
+              profitableRecipeIds: [1001],
+              profitableRecipeNames: ["Run profitable Iron Bar"],
+              marketSignalMatIds: [1],
+              marketSignalMatNames: ["Iron Ore"],
+              chainIds: ["chain-1001-2001"],
+              chainNames: ["Iron Bar -> Tools"],
+              warnings: []
+            }
+          ],
+          trendSignals: [
+            {
+              id: "profit-iron-bar",
+              kind: "profitability",
+              severity: "positive",
+              title: "Persistent profit lane: Run profitable Iron Bar",
+              summary: "Run profitable Iron Bar stayed in the profitability set for 2 recent snapshot(s).",
+              count: 2,
+              actionIds: [],
+              evidence: ["2026-05-17T00:00:00.000Z"]
+            }
+          ]
+        },
+        trendSignals: [
+          {
+            id: "profit-iron-bar",
+            kind: "profitability",
+            severity: "positive",
+            title: "Persistent profit lane: Run profitable Iron Bar",
+            summary: "Run profitable Iron Bar stayed in the profitability set for 2 recent snapshot(s).",
+            count: 2,
+            actionIds: [],
+            evidence: ["2026-05-17T00:00:00.000Z"]
+          }
+        ],
+        chainOpportunities: [
+          {
+            id: "chain-opportunity-restructure_chain-chain-1001-2001",
+            kind: "restructure_chain",
+            chainId: "chain-1001-2001",
+            title: "Restructure toward Tools chain",
+            recommendation: "Use Tools as a long-horizon chain target if setup gaps and liquidity checks stay favorable.",
+            horizonId: "d7",
+            horizonLabel: "7 Days",
+            score: 76,
+            confidence: "medium",
+            profitPerHour: 550000,
+            marginPct: 106,
+            inputCoveragePct: 100,
+            rationale: ["$5,500/h chain net estimate.", "2 linked production steps."],
+            blockers: ["Build or acquire Toolworks."]
+          }
+        ],
         projections: {
           horizons: [
             { id: "h12", label: "Next 12h", hours: 12 },
@@ -290,6 +418,59 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
       }
     });
   });
+  await page.route("**/api/agent/what-if", async (route) => {
+    const payload = route.request().postDataJSON();
+    expect(payload.scenarioType).toBeTruthy();
+    await route.fulfill({
+      json: {
+        generatedAt: new Date().toISOString(),
+        scenarioType: payload.scenarioType,
+        title: "Stage inputs for Tools",
+        baseline: {
+          title: "Current baseline",
+          summary: "Restock inputs and review exchange pricing.",
+          cash: 5000000,
+          cashDisplay: "$50,000",
+          profitPerHour: 200000,
+          profitPerHourDisplay: "$2,000/h",
+          materialDeltas: [],
+          productionImpact: ["Restock Iron Ore"],
+          risk: "low",
+          blockers: []
+        },
+        scenario: {
+          title: "Stage inputs for Tools",
+          summary: "Uses about $19,000 to prepare a $4,800/h recipe lane.",
+          cash: 3100000,
+          cashDisplay: "$31,000",
+          profitPerHour: 480000,
+          profitPerHourDisplay: "$4,800/h",
+          materialDeltas: [],
+          productionImpact: ["Toolworks requirement should be checked live."],
+          risk: "medium",
+          blockers: ["Build or acquire Toolworks."]
+        },
+        deltas: {
+          cash: -1900000,
+          profitPerHour: 280000,
+          materials: []
+        },
+        recommendedChoice: "defer",
+        rationale: ["Defer until blockers are resolved.", "Build or acquire Toolworks."],
+        blockers: ["Build or acquire Toolworks."],
+        preparedCommands: [
+          {
+            type: "review",
+            title: "Review Tools scenario",
+            executable: false,
+            payload: {},
+            steps: ["Open the recipe for Tools.", "Refresh live input and output prices."]
+          }
+        ],
+        warnings: []
+      }
+    });
+  });
 
   await page.goto("/");
   await page.getByLabel("Galactic Tycoons API key").fill("gt-test-key");
@@ -309,6 +490,8 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   await expect(page.getByText("Material pressure")).toBeVisible();
   await expect(page.getByText("Iron Ore: 100 net")).toBeVisible();
   await expect(page.getByText("Expected bottleneck").first()).toBeVisible();
+  await expect(page.getByRole("heading", { name: "1 run memory" })).toBeVisible();
+  await expect(page.getByText("Persistent profit lane: Run profitable Iron Bar")).toBeVisible();
   await expect(page.getByText("Best when:")).toBeVisible();
   await expect(page.getByText("1 material risk, 0 critical.")).toBeVisible();
   await expect(page.getByText("Why this is ranked:").first()).toBeVisible();
@@ -318,7 +501,16 @@ test("setup and sitrep dashboard flow", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Company-fit now" })).toBeVisible();
   await expect(page.getByText("Run profitable Iron Bar")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Global targets to restructure toward" })).toBeVisible();
-  await expect(page.getByText("Restructure toward Tools")).toBeVisible();
+  await expect(page.getByText("Restructure toward Tools", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Chains" }).click();
+  await expect(page.getByText("Chain optimizer")).toBeVisible();
+  await expect(page.getByText("Iron Bar -> Tools")).toBeVisible();
+  await expect(page.getByText("Restructure toward Tools chain", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "What-if" }).click();
+  await page.getByRole("button", { name: "Compare Scenario" }).click();
+  await expect(page.getByRole("heading", { name: "Stage inputs for Tools" })).toBeVisible();
+  await expect(page.getByText("Delta")).toBeVisible();
+  await expect(page.getByText("Build or acquire Toolworks.").first()).toBeVisible();
 });
 
 test("full OpenAI model remains selectable", async ({ page }) => {

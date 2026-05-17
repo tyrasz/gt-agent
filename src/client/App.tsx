@@ -7,6 +7,9 @@ import {
   CheckCircle2,
   ClipboardList,
   Factory,
+  FlaskConical,
+  GitBranch,
+  History,
   KeyRound,
   Loader2,
   LogOut,
@@ -19,9 +22,17 @@ import {
   Ship,
   TrendingUp
 } from "lucide-react";
-import type { ModelCatalogResponse, ModelOption, PressureSummary, Provider, SitrepResponse } from "../shared/schemas.js";
+import type {
+  ModelCatalogResponse,
+  ModelOption,
+  PressureSummary,
+  Provider,
+  SitrepResponse,
+  WhatIfScenarioRequest,
+  WhatIfScenarioResult
+} from "../shared/schemas.js";
 
-type Tab = "sitrep" | "market" | "profitability" | "operations" | "logistics" | "expansion" | "raw";
+type Tab = "sitrep" | "market" | "profitability" | "chains" | "whatif" | "operations" | "logistics" | "expansion" | "raw";
 
 const providerLabels: Record<Provider, string> = {
   openai: "OpenAI",
@@ -51,6 +62,8 @@ const tabs: Array<{ id: Tab; label: string; icon: typeof ClipboardList }> = [
   { id: "sitrep", label: "Sitrep", icon: ClipboardList },
   { id: "market", label: "Market", icon: BarChart3 },
   { id: "profitability", label: "Profitability", icon: TrendingUp },
+  { id: "chains", label: "Chains", icon: GitBranch },
+  { id: "whatif", label: "What-if", icon: FlaskConical },
   { id: "operations", label: "Operations", icon: Factory },
   { id: "logistics", label: "Logistics", icon: Ship },
   { id: "expansion", label: "Expansion", icon: Rocket },
@@ -477,7 +490,7 @@ export default function App() {
             </nav>
 
             <section className="dashboard-body">
-              {!sitrep ? <EmptyState loading={runLoading} /> : <DashboardTab tab={activeTab} sitrep={sitrep} />}
+              {!sitrep ? <EmptyState loading={runLoading} /> : <DashboardTab tab={activeTab} sitrep={sitrep} planning={planning} />}
             </section>
           </div>
         </section>
@@ -495,7 +508,22 @@ function EmptyState({ loading }: { loading: boolean }) {
   );
 }
 
-function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
+function DashboardTab({
+  tab,
+  sitrep,
+  planning
+}: {
+  tab: Tab;
+  sitrep: SitrepResponse;
+  planning: {
+    userPrompt: string;
+    nextLoginAt: string;
+    autonomyHours: number;
+    cashRiskLevel: string;
+    shortTermGoal: string;
+    notes: string;
+  };
+}) {
   if (tab === "market") {
     return (
       <div className="item-grid">
@@ -541,6 +569,14 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
 
   if (tab === "profitability") {
     return <ProfitabilityPanel sitrep={sitrep} />;
+  }
+
+  if (tab === "chains") {
+    return <ChainsPanel sitrep={sitrep} />;
+  }
+
+  if (tab === "whatif") {
+    return <WhatIfPanel sitrep={sitrep} planning={planning} />;
   }
 
   if (tab === "logistics") {
@@ -602,6 +638,7 @@ function DashboardTab({ tab, sitrep }: { tab: Tab; sitrep: SitrepResponse }) {
         ) : null}
       </section>
       {sitrep.decisionBrief ? <DecisionBriefPanel brief={sitrep.decisionBrief} /> : null}
+      <HistoryTrendPanel sitrep={sitrep} />
       {sitrep.projections ? <TimelinePanel sitrep={sitrep} /> : null}
       <div className="action-list">
         {sitrep.actionPlans.map((plan) => (
@@ -711,6 +748,54 @@ function TimelinePanel({ sitrep }: { sitrep: SitrepResponse }) {
   );
 }
 
+function HistoryTrendPanel({ sitrep }: { sitrep: SitrepResponse }) {
+  const history = sitrep.history;
+  const trends = sitrep.trendSignals ?? history?.trendSignals ?? [];
+  const latest = history?.entries.at(-1);
+  return (
+    <section className="history-panel" aria-label="History and Trends">
+      <div className="timeline-head">
+        <div>
+          <span className="category">History & trends</span>
+          <h2>{history?.entries.length ? `${history.entries.length} run memory` : "First run memory"}</h2>
+        </div>
+        <span className="status-pill"><History size={15} /> Session-only</span>
+      </div>
+      {trends.length === 0 ? (
+        <p className="muted-copy">
+          Run another fresh SITREP to compare cash, CV, repeated shortages, persistent profit lanes, and recommendation changes.
+        </p>
+      ) : (
+        <div className="trend-grid">
+          {trends.slice(0, 6).map((signal) => (
+            <article className="trend-card" key={signal.id}>
+              <header>
+                <strong>{signal.title}</strong>
+                <span className={`tag ${signal.severity === "positive" ? "buy" : signal.severity === "warning" ? "watch" : signal.severity === "critical" ? "avoid" : "restock"}`}>
+                  {signal.severity}
+                </span>
+              </header>
+              <p>{signal.summary}</p>
+              {signal.evidence.length > 0 ? (
+                <div className="mini-list">
+                  {signal.evidence.slice(0, 3).map((item) => <span key={item}>{item}</span>)}
+                </div>
+              ) : null}
+            </article>
+          ))}
+        </div>
+      )}
+      {latest ? (
+        <div className="mini-list">
+          {latest.topActionTitle ? <span>Latest top move: {latest.topActionTitle}</span> : null}
+          {latest.chainNames.slice(0, 2).map((chain) => <span key={chain}>Chain: {chain}</span>)}
+          {latest.profitableRecipeNames.slice(0, 2).map((recipe) => <span key={recipe}>Profit lane: {recipe}</span>)}
+        </div>
+      ) : null}
+    </section>
+  );
+}
+
 function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
   const profitability = sitrep.profitability;
   if (!profitability) {
@@ -736,6 +821,35 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
       </section>
       <ProfitabilityOpportunityGrid title="Company-fit now" opportunities={profitability.companyFit} />
       <ProfitabilityOpportunityGrid title="Global targets to restructure toward" opportunities={profitability.globalTargets} />
+      {(profitability.chainOpportunities ?? []).length > 0 ? (
+        <section className="profitability-section">
+          <header>
+            <h3>Production chains</h3>
+            <span>{(profitability.chainOpportunities ?? []).length} chain options</span>
+          </header>
+          <div className="item-grid">
+            {(profitability.chainOpportunities ?? []).slice(0, 4).map((opportunity) => (
+              <article className="data-card wide" key={opportunity.id}>
+                <header>
+                  <div>
+                    <span className="category">{opportunity.kind.replaceAll("_", " ")}</span>
+                    <strong>{opportunity.title}</strong>
+                  </div>
+                  <div className="plan-badges">
+                    <span className="horizon-chip">{opportunity.horizonLabel}</span>
+                    <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                    <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
+                  </div>
+                </header>
+                <p>{opportunity.recommendation}</p>
+                <div className="evidence-list">
+                  {[...opportunity.rationale, ...opportunity.blockers].slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+      ) : null}
       <section className="profitability-table-card">
         <header>
           <h3>Top recipe economics</h3>
@@ -768,6 +882,316 @@ function ProfitabilityPanel({ sitrep }: { sitrep: SitrepResponse }) {
         </div>
       </section>
     </div>
+  );
+}
+
+function ChainsPanel({ sitrep }: { sitrep: SitrepResponse }) {
+  const profitability = sitrep.profitability;
+  const chains = profitability?.chains ?? [];
+  const opportunities = sitrep.chainOpportunities ?? profitability?.chainOpportunities ?? [];
+  if (!profitability || chains.length === 0) {
+    return (
+      <div className="empty-state compact">
+        <GitBranch size={28} />
+        <h2>No chain candidates in this sitrep</h2>
+        <p>Chain optimization needs at least two linked profitable recipes in game data.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="profitability-stack">
+      <section className="profitability-summary">
+        <div>
+          <span className="category">Chain optimizer</span>
+          <h2>Linked production paths ranked by profit, coverage, fit, and liquidity</h2>
+        </div>
+        <div className="profitability-notes">
+          {opportunities.slice(0, 4).map((opportunity) => (
+            <span key={opportunity.id}>{opportunity.title}: {moneyPerHour(opportunity.profitPerHour)}</span>
+          ))}
+        </div>
+      </section>
+      <section className="profitability-section">
+        <header>
+          <h3>Chain opportunities</h3>
+          <span>{opportunities.length} options</span>
+        </header>
+        <div className="item-grid">
+          {opportunities.map((opportunity) => (
+            <article className="data-card wide" key={opportunity.id}>
+              <header>
+                <div>
+                  <span className="category">{opportunity.kind.replaceAll("_", " ")}</span>
+                  <strong>{opportunity.title}</strong>
+                </div>
+                <div className="plan-badges">
+                  <span className="score-chip">{Math.round(opportunity.score)}</span>
+                  <span className="profit-chip">{moneyPerHour(opportunity.profitPerHour)}</span>
+                  <span className={`confidence-chip ${opportunity.confidence}`}>{opportunity.confidence}</span>
+                </div>
+              </header>
+              <p>{opportunity.recommendation}</p>
+              <dl>
+                <div><dt>Horizon</dt><dd>{opportunity.horizonLabel}</dd></div>
+                <div><dt>Coverage</dt><dd>{Math.round(opportunity.inputCoveragePct ?? 0)}%</dd></div>
+                <div><dt>Margin</dt><dd>{opportunity.marginPct !== undefined ? `${Math.round(opportunity.marginPct)}%` : "n/a"}</dd></div>
+              </dl>
+              <div className="evidence-list">
+                {[...opportunity.rationale, ...opportunity.blockers].slice(0, 6).map((item) => <span key={item}>{item}</span>)}
+              </div>
+            </article>
+          ))}
+        </div>
+      </section>
+      <section className="profitability-section">
+        <header>
+          <h3>Chain candidates</h3>
+          <span>{chains.length} linked paths</span>
+        </header>
+        <div className="item-grid">
+          {chains.map((chain) => (
+            <article className="data-card wide" key={chain.id}>
+              <header>
+                <div>
+                  <span className="category">{chain.companyFit} chain</span>
+                  <strong>{chain.title}</strong>
+                </div>
+                <div className="plan-badges">
+                  <span className="profit-chip">{moneyPerHour(chain.totalNetProfitPerHour)}</span>
+                  <span className={`confidence-chip ${chain.confidence}`}>{chain.confidence}</span>
+                </div>
+              </header>
+              <dl>
+                <div><dt>Coverage</dt><dd>{Math.round(chain.inputCoveragePct)}%</dd></div>
+                <div><dt>Liquidity</dt><dd>{Math.round(chain.liquidityScore)}</dd></div>
+                <div><dt>Margin</dt><dd>{chain.marginPct !== undefined ? `${Math.round(chain.marginPct)}%` : "n/a"}</dd></div>
+              </dl>
+              <div className="chain-step-list">
+                {chain.steps.map((step, index) => (
+                  <span key={`${chain.id}-${step.recipeId}`}>{index + 1}. {step.outputMatName} ({moneyPerHour(step.netEstimatePerHour)})</span>
+                ))}
+              </div>
+              {chain.setupGaps.length > 0 ? <p className="warning-text">{chain.setupGaps.slice(0, 4).join(" ")}</p> : null}
+            </article>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function WhatIfPanel({
+  sitrep,
+  planning
+}: {
+  sitrep: SitrepResponse;
+  planning: {
+    userPrompt: string;
+    nextLoginAt: string;
+    autonomyHours: number;
+    cashRiskLevel: string;
+    shortTermGoal: string;
+    notes: string;
+  };
+}) {
+  const recipes = sitrep.profitability?.recipes ?? [];
+  const materials = useMemo(() => {
+    const byId = new globalThis.Map<number, string>();
+    for (const signal of sitrep.marketSignals) byId.set(signal.matId, signal.matName);
+    for (const risk of sitrep.stockoutRisks) byId.set(risk.matId, risk.matName);
+    for (const recipe of recipes) {
+      byId.set(recipe.outputMatId, recipe.outputMatName);
+      for (const matId of recipe.inputMatIds) if (!byId.has(matId)) byId.set(matId, `Material ${matId}`);
+    }
+    return [...byId.entries()].map(([id, name]) => ({ id, name }));
+  }, [recipes, sitrep.marketSignals, sitrep.stockoutRisks]);
+  const [form, setForm] = useState({
+    scenarioType: "stage_inputs" as WhatIfScenarioRequest["scenarioType"],
+    recipeId: recipes[0]?.recipeId ? String(recipes[0].recipeId) : "",
+    matId: materials[0]?.id ? String(materials[0].id) : "",
+    quantity: "",
+    cashSpend: "",
+    bufferHours: "24",
+    description: ""
+  });
+  const [result, setResult] = useState<WhatIfScenarioResult | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setLoading(true);
+    setError("");
+    try {
+      const payload: WhatIfScenarioRequest = {
+        scenarioType: form.scenarioType,
+        planningContext: {
+          ...planning,
+          autonomyHours: Number(planning.autonomyHours),
+          cashRiskLevel: planning.cashRiskLevel as WhatIfScenarioRequest["planningContext"]["cashRiskLevel"],
+          nextLoginAt: planning.nextLoginAt || undefined,
+          userPrompt: planning.userPrompt || undefined,
+          notes: planning.notes || undefined
+        },
+        recipeId: form.recipeId ? Number(form.recipeId) : undefined,
+        matId: form.matId ? Number(form.matId) : undefined,
+        quantity: form.quantity ? Number(form.quantity) : undefined,
+        cashSpend: form.cashSpend ? Number(form.cashSpend) : undefined,
+        bufferHours: form.bufferHours ? Number(form.bufferHours) : undefined,
+        description: form.description || undefined
+      };
+      const response = await fetch("/api/agent/what-if", {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error ?? "Could not evaluate scenario.");
+      setResult(body);
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Could not evaluate scenario.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="whatif-layout">
+      <form className="whatif-form" onSubmit={submit}>
+        <div className="section-heading">
+          <FlaskConical size={19} />
+          <h2>Scenario planner</h2>
+        </div>
+        <div className="context-grid">
+          <label>
+            Scenario
+            <select value={form.scenarioType} onChange={(event) => setForm({ ...form, scenarioType: event.target.value as WhatIfScenarioRequest["scenarioType"] })}>
+              <option value="stage_inputs">Stage inputs</option>
+              <option value="start_recipe">Start recipe</option>
+              <option value="switch_production">Switch production</option>
+              <option value="buy_material">Buy material</option>
+              <option value="increase_buffer">Increase buffer</option>
+              <option value="build_expansion">Build / expand</option>
+            </select>
+          </label>
+          <label>
+            Recipe
+            <select value={form.recipeId} onChange={(event) => setForm({ ...form, recipeId: event.target.value })}>
+              <option value="">Auto</option>
+              {recipes.slice(0, 30).map((recipe) => (
+                <option key={recipe.recipeId} value={recipe.recipeId}>{recipe.outputMatName} ({recipe.recipeId})</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Material
+            <select value={form.matId} onChange={(event) => setForm({ ...form, matId: event.target.value })}>
+              <option value="">Auto</option>
+              {materials.map((material) => (
+                <option key={material.id} value={material.id}>{material.name} ({material.id})</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Quantity
+            <input type="number" min="0" value={form.quantity} onChange={(event) => setForm({ ...form, quantity: event.target.value })} placeholder="Auto" />
+          </label>
+        </div>
+        <div className="field-row">
+          <label>
+            Cash spend override
+            <input type="number" min="0" value={form.cashSpend} onChange={(event) => setForm({ ...form, cashSpend: event.target.value })} placeholder="Auto" />
+          </label>
+          <label>
+            Buffer hours
+            <input type="number" min="1" max="168" value={form.bufferHours} onChange={(event) => setForm({ ...form, bufferHours: event.target.value })} />
+          </label>
+        </div>
+        <label>
+          Scenario note
+          <textarea value={form.description} onChange={(event) => setForm({ ...form, description: event.target.value })} />
+        </label>
+        {error ? <p className="error-line">{error}</p> : null}
+        <button className="primary-button run-button" type="submit" disabled={loading}>
+          {loading ? <Loader2 className="spin" size={18} /> : <FlaskConical size={18} />}
+          Compare Scenario
+        </button>
+      </form>
+      {result ? <WhatIfResultCards result={result} /> : (
+        <section className="whatif-result empty">
+          <h2>Baseline vs scenario</h2>
+          <p>Choose a scenario to compare cash impact, projected profit, material deltas, risk, and blockers without changing in-game state.</p>
+        </section>
+      )}
+    </div>
+  );
+}
+
+function WhatIfResultCards({ result }: { result: WhatIfScenarioResult }) {
+  return (
+    <section className="whatif-result">
+      <header>
+        <div>
+          <span className="category">{result.scenarioType.replaceAll("_", " ")}</span>
+          <h2>{result.title}</h2>
+        </div>
+        <span className={`tag ${result.recommendedChoice === "scenario" ? "buy" : result.recommendedChoice === "defer" ? "watch" : "avoid"}`}>
+          {result.recommendedChoice}
+        </span>
+      </header>
+      <div className="comparison-grid">
+        <ScenarioCard label="Baseline" state={result.baseline} />
+        <ScenarioCard label="Scenario" state={result.scenario} />
+      </div>
+      <div className="decision-grid">
+        <article>
+          <h3>Delta</h3>
+          <p>Cash: {result.deltas.cash !== undefined ? moneyDelta(result.deltas.cash) : "n/a"}</p>
+          <p>Profit: {result.deltas.profitPerHour !== undefined ? `${moneyDelta(result.deltas.profitPerHour)}/h` : "n/a"}</p>
+          {result.deltas.materials.map((delta) => (
+            <p key={delta.matId}>{delta.matName}: {delta.quantityDelta.toLocaleString()} units</p>
+          ))}
+        </article>
+        <article>
+          <h3>Rationale</h3>
+          <ul>{result.rationale.map((item) => <li key={item}>{item}</li>)}</ul>
+        </article>
+        <details>
+          <summary>Prepared manual steps</summary>
+          {result.preparedCommands.length === 0 ? <p>No prepared command for this scenario.</p> : (
+            <ol>{result.preparedCommands.flatMap((command) => command.steps).map((step) => <li key={step}>{step}</li>)}</ol>
+          )}
+        </details>
+      </div>
+      {result.blockers.length > 0 ? <p className="warning-text">{result.blockers.join(" ")}</p> : null}
+    </section>
+  );
+}
+
+function ScenarioCard({ label, state }: { label: string; state: WhatIfScenarioResult["baseline"] }) {
+  return (
+    <article className="data-card">
+      <header>
+        <div>
+          <span className="category">{label}</span>
+          <strong>{state.title}</strong>
+        </div>
+        <span className={`priority ${state.risk}`}>{state.risk}</span>
+      </header>
+      <p>{state.summary}</p>
+      <dl>
+        <div><dt>Cash</dt><dd>{state.cashDisplay ?? "n/a"}</dd></div>
+        <div><dt>Profit / h</dt><dd>{state.profitPerHourDisplay ?? "n/a"}</dd></div>
+        <div><dt>Blockers</dt><dd>{state.blockers.length}</dd></div>
+      </dl>
+      {state.productionImpact.length > 0 ? (
+        <div className="evidence-list">
+          {state.productionImpact.slice(0, 5).map((item) => <span key={item}>{item}</span>)}
+        </div>
+      ) : null}
+    </article>
   );
 }
 
@@ -888,4 +1312,9 @@ function money(cents: number) {
 
 function moneyPerHour(cents: number) {
   return `${money(cents)}/h`;
+}
+
+function moneyDelta(cents: number) {
+  const sign = cents >= 0 ? "+" : "-";
+  return `${sign}$${(Math.abs(cents) / 100).toLocaleString(undefined, { maximumFractionDigits: 2 })}`;
 }

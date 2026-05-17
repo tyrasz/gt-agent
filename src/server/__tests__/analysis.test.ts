@@ -4,6 +4,8 @@ import { analyzeSnapshot, buildDeterministicSitrep } from "../analysis.js";
 import { normalizeSnapshot } from "../analysis/normalizers.js";
 import { computeProfitability } from "../analysis/profitability.js";
 import { classifyPlanningIntent } from "../analysis/strategy.js";
+import { StrategyHistoryStore } from "../historyStore.js";
+import { evaluateWhatIf } from "../whatIf.js";
 import { makeSnapshot } from "./fixtures.js";
 
 const context = {
@@ -48,6 +50,8 @@ describe("analysis", () => {
     expect(sitrep.marketSignals[0]).toHaveProperty("liquidityScore");
     expect(sitrep.profitability?.companyFit.length).toBeGreaterThan(0);
     expect(sitrep.profitability?.globalTargets.length).toBeGreaterThan(0);
+    expect(sitrep.profitability?.chains.length).toBeGreaterThan(0);
+    expect(sitrep.chainOpportunities?.length).toBeGreaterThan(0);
   });
 
   it("computes recipe profitability from market prices and CP fallback", () => {
@@ -83,6 +87,60 @@ describe("analysis", () => {
     expect(companyPlanIndex).toBeGreaterThanOrEqual(0);
     expect(globalPlanIndex).toBeGreaterThanOrEqual(0);
     expect(companyPlanIndex).toBeLessThan(globalPlanIndex);
+  });
+
+  it("ranks linked production chains and creates chain action plans", () => {
+    const sitrep = buildDeterministicSitrep(makeSnapshot(), {
+      ...context,
+      userPrompt: "Increase CV by optimizing production chains."
+    }, "openai", "test-model");
+    const chain = sitrep.profitability?.chains.find((item) => item.title.includes("Iron Bar -> Tools"));
+    const opportunity = sitrep.profitability?.chainOpportunities.find((item) => item.chainId === chain?.id);
+    const plan = sitrep.actionPlans.find((item) => item.id.includes("profit-chain") && item.title.includes("Tools"));
+
+    expect(chain).toBeTruthy();
+    expect(chain?.steps.map((step) => step.outputMatName)).toEqual(["Iron Bar", "Tools"]);
+    expect(opportunity?.profitPerHour).toBeGreaterThan(0);
+    expect(plan?.category).toBe("profitability");
+    expect(plan?.profitabilityTag).toMatch(/chain/);
+  });
+
+  it("stores only sanitized session history and detects repeated strategy signals", () => {
+    const store = new StrategyHistoryStore();
+    const first = buildDeterministicSitrep(makeSnapshot(), context, "openai", "test-model");
+    const secondSnapshot = cloneSnapshot(makeSnapshot());
+    secondSnapshot.company.cash = 5_500_000;
+    secondSnapshot.company.value = 21_000_000;
+    const second = buildDeterministicSitrep(secondSnapshot, context, "openai", "test-model");
+
+    store.record("session-a", first);
+    const summary = store.record("session-a", second);
+    const serialized = JSON.stringify(summary);
+
+    expect(summary.entries).toHaveLength(2);
+    expect(summary.trendSignals.some((signal) => signal.kind === "cash" && signal.severity === "positive")).toBe(true);
+    expect(summary.trendSignals.some((signal) => signal.kind === "profitability")).toBe(true);
+    expect(serialized).not.toContain("gt-secret");
+    expect(serialized).not.toContain("sk-");
+    expect(serialized).not.toContain("providerKeys");
+    expect(serialized).not.toContain("gtApiKey");
+    expect(serialized).not.toContain("rawSnapshot");
+  });
+
+  it("evaluates what-if scenarios without mutating the source snapshot", () => {
+    const snapshot = cloneSnapshot(makeSnapshot());
+    const before = JSON.stringify(snapshot);
+    const result = evaluateWhatIf(snapshot, {
+      scenarioType: "stage_inputs",
+      planningContext: context,
+      recipeId: 2001
+    });
+
+    expect(result.scenario.title).toContain("Tools");
+    expect(result.deltas.profitPerHour ?? 0).toBeGreaterThan(0);
+    expect(result.scenario.cash).toBeLessThan(result.baseline.cash ?? Infinity);
+    expect(result.preparedCommands.every((command) => command.executable === false)).toBe(true);
+    expect(JSON.stringify(snapshot)).toBe(before);
   });
 
   it("projects material needs per horizon without mutating the snapshot", () => {

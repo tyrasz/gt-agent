@@ -567,6 +567,48 @@ textarea {
   padding: 16px;
 }
 
+.history-panel {
+  border: 1px solid #dce3df;
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  padding: 16px;
+}
+
+.muted-copy {
+  color: #536066;
+  font-size: 0.88rem;
+  line-height: 1.42;
+}
+
+.trend-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.trend-card {
+  background: #f8faf8;
+  border: 1px solid #dce6df;
+  border-radius: 8px;
+  display: grid;
+  gap: 8px;
+  padding: 12px;
+}
+
+.trend-card header {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.trend-card p {
+  color: #46534e;
+  font-size: 0.84rem;
+  line-height: 1.38;
+}
+
 .timeline-head {
   align-items: center;
   display: flex;
@@ -754,6 +796,57 @@ textarea {
 .profitability-stack {
   display: grid;
   gap: 16px;
+}
+
+.whatif-layout {
+  display: grid;
+  gap: 16px;
+}
+
+.whatif-form,
+.whatif-result {
+  border: 1px solid #dce3df;
+  border-radius: 8px;
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.whatif-result.empty {
+  background: #f8faf8;
+  color: #536066;
+}
+
+.whatif-result > header {
+  align-items: start;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+}
+
+.whatif-result h2,
+.whatif-form h2 {
+  font-size: 1.02rem;
+}
+
+.comparison-grid {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.chain-step-list {
+  display: grid;
+  gap: 6px;
+}
+
+.chain-step-list span {
+  background: #f8faf8;
+  border: 1px solid #dce6df;
+  border-radius: 7px;
+  color: #46534e;
+  font-size: 0.82rem;
+  padding: 8px 10px;
 }
 
 .profitability-summary,

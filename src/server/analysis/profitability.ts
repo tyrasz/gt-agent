@@ -6,6 +6,7 @@ import type {
   ProfitabilitySet
 } from "../../shared/schemas.js";
 import type { BuildingInfo, NormalizedSnapshot } from "./normalizers.js";
+import { computeChainOpportunities } from "./chains.js";
 import { materialId, materialQuantity } from "./normalizers.js";
 import { clamp, formatMoney, formatPct, numberValue, recordArray, round, text } from "./utils.js";
 
@@ -59,11 +60,14 @@ export function computeProfitability(
     .sort((a, b) => b.score - a.score)
     .filter((opportunity, index) => index < 12 || !companyRecipeIds.has(opportunity.recipeId))
     .slice(0, 8);
+  const chains = computeChainOpportunities(recipes, context);
 
   return {
     recipes,
     companyFit,
     globalTargets,
+    chains: chains.chains,
+    chainOpportunities: chains.chainOpportunities,
     assumptions: PROFITABILITY_ASSUMPTIONS,
     warnings
   };

@@ -9,6 +9,7 @@ import type {
   PlayerPlanningContext,
   ProjectedMaterialNeed,
   PreparedCommand,
+  ChainOpportunity,
   ProfitabilityOpportunity,
   ProfitabilitySet,
   ProjectionSet,
@@ -232,6 +233,10 @@ function addProfitabilityPlans(
   for (const opportunity of profitability.globalTargets.filter((item) => !existingRecipeIds.has(item.recipeId)).slice(0, 3)) {
     addProfitabilityPlan(plans, opportunity, context, intent, urgentOperations);
   }
+
+  for (const opportunity of (profitability.chainOpportunities ?? []).slice(0, 4)) {
+    addChainPlan(plans, opportunity, context, intent, urgentOperations);
+  }
 }
 
 function addProfitabilityPlan(
@@ -287,6 +292,60 @@ function addProfitabilityPlan(
       "Input coverage, facility fit, and output liquidity remain valid in-game."
     ],
     preparedCommands: [profitabilityCommand(opportunity)]
+  }, score, breakdown));
+}
+
+function addChainPlan(
+  plans: ActionPlan[],
+  opportunity: ChainOpportunity,
+  context: PlayerPlanningContext,
+  intent: PlanningIntent,
+  urgentOperations: boolean
+): void {
+  const scoreCap = opportunity.kind === "restructure_chain"
+    ? intent === "cv_growth" || intent === "market_profit" ? 70 : 56
+    : 86;
+  const urgency = opportunity.kind === "deepen_chain" ? 48 : opportunity.kind === "stage_chain" ? 36 : 22;
+  const companyFit = opportunity.kind === "deepen_chain" ? 88 : opportunity.kind === "stage_chain" ? 70 : 38;
+  const confidence = opportunity.confidence === "high" ? 88 : opportunity.confidence === "medium" ? 62 : 34;
+  const breakdown = {
+    urgency: urgentOperations ? Math.max(18, urgency - 14) : urgency,
+    companyFit,
+    profitPotential: clamp(opportunity.score),
+    marketConfidence: confidence,
+    feasibility: clamp(80 - opportunity.blockers.length * 10),
+    goalAlignment: scoreGoalAlignment(context, intent, opportunity.title, "profitability")
+  };
+  const score = Math.min(weightedScore(breakdown), scoreCap);
+  const id = `profit-chain-${opportunity.kind}-${opportunity.chainId}`;
+  plans.push(withScore({
+    id,
+    title: opportunity.title,
+    priority: priorityFromScore(score),
+    category: "profitability",
+    horizonId: opportunity.horizonId,
+    horizonLabel: opportunity.horizonLabel,
+    latestUsefulByHours: opportunity.horizonId === "d1" ? 24 : opportunity.horizonId === "d3" ? 72 : 168,
+    profitPerHour: opportunity.profitPerHour,
+    marginPct: opportunity.marginPct,
+    profitabilityTag: opportunity.kind === "restructure_chain" ? "global chain" : "company-fit chain",
+    expectedBenefit: `${formatMoney(opportunity.profitPerHour)}/h estimated chain value${opportunity.marginPct !== undefined ? ` at ${formatPct(opportunity.marginPct)} margin` : ""}.`,
+    costSummary: opportunity.blockers.length > 0 ? opportunity.blockers.join(" ") : "No major chain setup gap visible from the read-only snapshot.",
+    risk: opportunity.kind === "restructure_chain"
+      ? "This is a long-horizon chain target; setup gaps, input availability, and output liquidity must be rechecked across multiple snapshots."
+      : "Chain profitability can collapse if any upstream input or downstream sell price moves before execution.",
+    evidence: uniqueStrings([...opportunity.rationale, ...opportunity.blockers]).slice(0, 6),
+    whyNow: opportunity.recommendation,
+    bestWhen: opportunity.kind === "restructure_chain"
+      ? "Use this when the chain beats current specialization after setup cost, input supply, and output liquidity checks."
+      : "Use this when each linked recipe still shows positive margin and the current base setup can support the loop.",
+    avoidIf: "Avoid if one upstream input is thin, a required building is unavailable, or the final output has weak demand.",
+    whatWouldChangeThis: "Repeated snapshots showing weaker margins or unresolved setup gaps should demote this chain.",
+    futureTriggers: [
+      `${opportunity.title} remains profitable through ${opportunity.horizonLabel}.`,
+      "Input coverage, facility fit, and final output liquidity remain valid."
+    ],
+    preparedCommands: [chainCommand(opportunity)]
   }, score, breakdown));
 }
 
@@ -493,10 +552,11 @@ function buildThesis(
   const company = normalized.companyName;
   const topProfit = profitability.companyFit[0];
   const topGlobal = profitability.globalTargets[0];
+  const topChain = profitability.chainOpportunities?.[0];
   if (intent === "cv_growth") {
-    if (topProfit || topGlobal) {
+    if (topProfit || topGlobal || topChain) {
       const immediate = topProfit ? `${topProfit.title} (${formatMoney(topProfit.profitPerHour)}/h)` : "no company-fit profit move";
-      const strategic = topGlobal ? `${topGlobal.title} (${formatMoney(topGlobal.profitPerHour)}/h)` : "no clear global target";
+      const strategic = topChain ? `${topChain.title} (${formatMoney(topChain.profitPerHour)}/h chain case)` : topGlobal ? `${topGlobal.title} (${formatMoney(topGlobal.profitPerHour)}/h)` : "no clear global target";
       return `${company}'s CV path should be profit-led: use ${immediate} as the near-term proof point, then compare it against ${strategic} before restructuring or expanding.`;
     }
     if (noStrongAction) {
@@ -505,6 +565,7 @@ function buildThesis(
     return `${company}'s best CV path is to execute ${topAction?.title ?? "the top ranked move"} first, then use the next inspection pass to decide whether capacity expansion or diversification has the better return.`;
   }
   if (intent === "market_profit") {
+    if (topChain && topChain.kind !== "restructure_chain") return `${company}'s strongest profit angle is chain optimization: ${topChain.title}, estimated at ${formatMoney(topChain.profitPerHour)}/h across linked steps.`;
     if (topProfit) return `${company}'s best profit angle is ${topProfit.title}, estimated at ${formatMoney(topProfit.profitPerHour)}/h before omitted shipping/maintenance assumptions.`;
     return topAction?.category === "market"
       ? `${company}'s best near-term profit move is ${topAction.title}, with manual exchange checks before committing.`
@@ -548,10 +609,11 @@ function buildRecommendedPath(
   if (intent === "cv_growth") {
     const topProfit = profitability.companyFit[0];
     const topGlobal = profitability.globalTargets[0];
+    const topChain = profitability.chainOpportunities?.[0];
     return [
       noStrongAction ? "1. Hold major spending until the Profitability tab identifies a real CV lever." : path[0] ?? "1. Execute the top ranked operational move first.",
       topProfit ? `2. Deepen current specialization only if ${topProfit.title} remains the near-term company-fit profit benchmark (${formatMoney(topProfit.profitPerHour)}/h).` : `2. Use the ${projections.horizons.map((horizon) => horizon.label).join(" / ")} timeline to separate blockers from CV prep.`,
-      topGlobal ? `3. Compare diversification against the global target ${topGlobal.title}; restructure only if setup gaps are affordable and live margins persist.` : "3. Compare deeper specialization against diversification using recipe profit, input availability, and facility requirements.",
+      topChain ? `3. Compare chain optimization against diversification using ${topChain.title}; advance only if all linked steps keep margin and coverage.` : topGlobal ? `3. Compare diversification against the global target ${topGlobal.title}; restructure only if setup gaps are affordable and live margins persist.` : "3. Compare deeper specialization against diversification using recipe profit, input availability, and facility requirements.",
       "4. Commit cash only to the option with clear throughput, market access, and material coverage before the relevant horizon."
     ];
   }
@@ -578,12 +640,14 @@ function buildWhyThisPath(
   const projectedShortageBands = projections.bands.filter((band) => band.materialNeeds.length > 0).map((band) => band.horizonId);
   const topProfit = profitability.companyFit[0];
   const topGlobal = profitability.globalTargets[0];
+  const topChain = profitability.chainOpportunities?.[0];
   return uniqueStrings([
     topAction ? `${topAction.title} is ranked highest with score ${Math.round(topAction.score ?? 0)} and ${topAction.confidence ?? "unknown"} confidence.` : "No ranked action was strong enough to justify immediate execution.",
     `Production pressure is ${situation.production.status}: ${situation.production.summary}`,
     `Logistics pressure is ${situation.logistics.status}: ${situation.logistics.summary}`,
     `Market pressure is ${situation.market.status}: ${actionableMarkets} actionable signals survived company-fit filters.`,
     topProfit ? `Top company-fit profitability option is ${topProfit.title} at ${formatMoney(topProfit.profitPerHour)}/h.` : "No company-fit profitable production option cleared the current filters.",
+    topChain ? `Best chain opportunity is ${topChain.title} at ${formatMoney(topChain.profitPerHour)}/h.` : undefined,
     topGlobal ? `Best global restructure target is ${topGlobal.title} at ${formatMoney(topGlobal.profitPerHour)}/h, before setup validation.` : undefined,
     stockoutRisks.length > 0 ? `${stockoutRisks.length} stockout risks are visible in the planning window.` : "No stockout risk is visible in the current planning window.",
     projectedShortageBands.length > 0 ? `Longer-horizon material pressure appears in ${projectedShortageBands.length} projection band(s).` : "No projected material shortfall appears in the configured horizons.",
@@ -602,17 +666,18 @@ function buildAlternatives(
   if (intent === "cv_growth" || intent === "expansion") {
     const topProfit = profitability.companyFit[0];
     const topGlobal = profitability.globalTargets[0];
+    const topChain = profitability.chainOpportunities?.[0];
     return [
       {
-        title: topProfit ? `Deepen ${topProfit.title.replace(/^Run profitable |^Stage inputs for /, "")}` : "Deepen current specialization",
-        pros: [topProfit ? `Company-fit estimate: ${formatMoney(topProfit.profitPerHour)}/h.` : "Lower setup risk because it builds around known facilities and recipes.", "Usually improves CV through throughput once input coverage is proven."],
-        cons: topProfit?.blockers.length ? topProfit.blockers : ["Can stall if the current chain lacks margin, contracts, or stable inputs."],
+        title: topChain && topChain.kind !== "restructure_chain" ? `Deepen ${topChain.title.replace(/^Optimize /, "")}` : topProfit ? `Deepen ${topProfit.title.replace(/^Run profitable |^Stage inputs for /, "")}` : "Deepen current specialization",
+        pros: [topChain ? `Chain estimate: ${formatMoney(topChain.profitPerHour)}/h.` : topProfit ? `Company-fit estimate: ${formatMoney(topProfit.profitPerHour)}/h.` : "Lower setup risk because it builds around known facilities and recipes.", "Usually improves CV through throughput once input coverage is proven."],
+        cons: topChain?.blockers.length ? topChain.blockers : topProfit?.blockers.length ? topProfit.blockers : ["Can stall if the current chain lacks margin, contracts, or stable inputs."],
         chooseWhen: "Choose this when current recipe profit, input supply, and base capacity all support higher throughput."
       },
       {
-        title: topGlobal ? `Diversify toward ${topGlobal.title.replace(/^Restructure toward /, "")}` : "Diversify into another industry",
-        pros: [topGlobal ? `Global target estimate: ${formatMoney(topGlobal.profitPerHour)}/h.` : "Can open new markets and reduce dependence on one production lane."],
-        cons: topGlobal?.blockers.length ? topGlobal.blockers : ["Higher setup risk because facilities, materials, logistics, and sell demand may all be unknown."],
+        title: topChain && topChain.kind === "restructure_chain" ? `Diversify toward ${topChain.title.replace(/^Restructure toward /, "")}` : topGlobal ? `Diversify toward ${topGlobal.title.replace(/^Restructure toward /, "")}` : "Diversify into another industry",
+        pros: [topChain && topChain.kind === "restructure_chain" ? `Global chain estimate: ${formatMoney(topChain.profitPerHour)}/h.` : topGlobal ? `Global target estimate: ${formatMoney(topGlobal.profitPerHour)}/h.` : "Can open new markets and reduce dependence on one production lane."],
+        cons: topChain && topChain.kind === "restructure_chain" && topChain.blockers.length ? topChain.blockers : topGlobal?.blockers.length ? topGlobal.blockers : ["Higher setup risk because facilities, materials, logistics, and sell demand may all be unknown."],
         chooseWhen: "Choose this only when the global target beats the company-fit lane after setup cost, input depth, and output liquidity checks."
       },
       {
@@ -671,11 +736,13 @@ function buildInspectNext(
 ): string[] {
   const topPlan = actionPlans[0];
   const topProfit = profitability.companyFit[0] ?? profitability.globalTargets[0];
+  const topChain = profitability.chainOpportunities?.[0];
   return uniqueStrings([
     topPlan ? `Open the screen for "${topPlan.title}" and verify the snapshot still matches live state.` : "Open the current production/base overview and confirm there are no hidden blockers.",
     "Refresh exchange depth and price before any buy/sell decision.",
     "Check warehouse free tonnes before moving or buying bulky materials.",
     topProfit ? `Open the Profitability tab and verify ${topProfit.title} against live input/output prices.` : "Use the Profitability tab to find a production lane before long-term restructuring.",
+    topChain ? `Open the Chains view and verify every linked step in ${topChain.title}.` : undefined,
     intent === "cv_growth" ? "For CV growth, compare current specialization vs diversification by recipe margin, input availability, facility cost, and sell demand." : undefined,
     intent === "cv_growth" || intent === "expansion" ? "Open base plans and record required materials before committing expansion cash." : undefined,
     marketSignals[0] ? `Inspect ${marketSignals[0].matName} market depth because it is the strongest visible market signal.` : undefined,
@@ -819,6 +886,21 @@ function profitabilityCommand(opportunity: ProfitabilityOpportunity): PreparedCo
     steps: opportunity.blockers.length > 0
       ? [...reviewSteps, ...opportunity.blockers.map((blocker) => `Resolve: ${blocker}`)]
       : reviewSteps
+  };
+}
+
+function chainCommand(opportunity: ChainOpportunity): PreparedCommand {
+  return {
+    type: "review",
+    title: `Review ${opportunity.title}`,
+    executable: false,
+    payload: { chainId: opportunity.chainId, opportunityId: opportunity.id, kind: opportunity.kind },
+    steps: [
+      "Open the Profitability and production views for each linked recipe.",
+      "Refresh live input and output exchange prices for every chain step.",
+      "Confirm building access, research, input coverage, warehouse room, and final output depth.",
+      ...opportunity.blockers.map((blocker) => `Resolve: ${blocker}`)
+    ]
   };
 }
 

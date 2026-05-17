@@ -5,18 +5,21 @@ import staticPlugin from "@fastify/static";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { GalacticTycoonsClient, GtApiError, RateLimitError } from "./gtClient.js";
+import { StrategyHistoryStore } from "./historyStore.js";
 import { formatTimeout, LlmProviderError, LlmProviderTimeoutError, RestLlmPlanner } from "./llm/providers.js";
 import { ModelCatalogService } from "./modelCatalog.js";
 import { redactError, redactSecrets } from "./redact.js";
 import { MissingProviderKeyError, SessionStore } from "./sessionStore.js";
 import { SitrepService } from "./sitrepService.js";
-import { modelCatalogQuerySchema, sessionKeysRequestSchema, sitrepRequestSchema } from "../shared/schemas.js";
+import { modelCatalogQuerySchema, sessionKeysRequestSchema, sitrepRequestSchema, whatIfScenarioRequestSchema } from "../shared/schemas.js";
+import { evaluateWhatIf } from "./whatIf.js";
 
 export type CreateAppOptions = {
   gtClient?: GalacticTycoonsClient;
   llmPlanner?: RestLlmPlanner;
   modelCatalog?: ModelCatalogService;
   sessionStore?: SessionStore;
+  historyStore?: StrategyHistoryStore;
 };
 
 export async function createApp(options: CreateAppOptions = {}): Promise<FastifyInstance> {
@@ -24,7 +27,8 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   const gtClient = options.gtClient ?? new GalacticTycoonsClient();
   const llmPlanner = options.llmPlanner ?? new RestLlmPlanner();
   const modelCatalog = options.modelCatalog ?? new ModelCatalogService();
-  const sitrepService = new SitrepService(gtClient, llmPlanner, sessions);
+  const historyStore = options.historyStore ?? new StrategyHistoryStore();
+  const sitrepService = new SitrepService(gtClient, llmPlanner, sessions, historyStore);
 
   const app = fastify({
     logger: {
@@ -61,6 +65,8 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
   });
 
   app.delete("/api/session", async (request, reply) => {
+    const session = sessions.get(request);
+    if (session) historyStore.clear(session.id);
     sessions.destroy(request, reply);
     return { ok: true };
   });
@@ -85,6 +91,12 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
       request.log.error({ error: redactError(error) }, "model catalog failed");
       return reply.code(500).send({ error: "Could not load provider models." });
     }
+  });
+
+  app.get("/api/agent/history", async (request, reply) => {
+    const session = sessions.get(request);
+    if (!session) return reply.code(401).send({ error: "No active GT Agent session." });
+    return historyStore.summary(session.id);
   });
 
   app.post("/api/agent/sitrep", async (request, reply) => {
@@ -143,6 +155,41 @@ export async function createApp(options: CreateAppOptions = {}): Promise<Fastify
       }
       request.log.error({ error: redactError(error) }, "sitrep generation failed");
       return reply.code(500).send({ error: "Could not generate sitrep." });
+    }
+  });
+
+  app.post("/api/agent/what-if", async (request, reply) => {
+    const session = sessions.get(request);
+    if (!session) return reply.code(401).send({ error: "No active GT Agent session." });
+
+    const parsed = whatIfScenarioRequestSchema.safeParse(request.body);
+    if (!parsed.success) {
+      return reply.code(400).send({ error: "Invalid what-if request.", details: parsed.error.format() });
+    }
+
+    try {
+      const snapshot = await gtClient.getSnapshot(session, {
+        forceCompany: true,
+        forceMarket: true,
+        forceGameData: false
+      });
+      return evaluateWhatIf(snapshot, parsed.data);
+    } catch (error) {
+      if (error instanceof RateLimitError) {
+        return reply.code(429).send({
+          error: error.message,
+          details: { endpoint: error.endpoint, retryAfterSeconds: error.retryAfterSeconds }
+        });
+      }
+      if (error instanceof GtApiError) {
+        const statusCode = error.status === 401 || error.status === 403 ? 401 : 502;
+        return reply.code(statusCode).send({
+          error: error.message,
+          details: { endpoint: error.endpoint, status: error.status }
+        });
+      }
+      request.log.error({ error: redactError(error) }, "what-if generation failed");
+      return reply.code(500).send({ error: "Could not evaluate what-if scenario." });
     }
   });
 

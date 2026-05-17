@@ -1,5 +1,6 @@
 import { buildDeterministicSitrep } from "./analysis.js";
 import type { GalacticTycoonsClient } from "./gtClient.js";
+import { StrategyHistoryStore } from "./historyStore.js";
 import type { LlmPlanner } from "./llm/providers.js";
 import type { AgentSession, SessionStore } from "./sessionStore.js";
 import type { RefreshOptions, SitrepRequest, SitrepResponse } from "../shared/schemas.js";
@@ -14,7 +15,8 @@ export class SitrepService {
   constructor(
     private readonly gtClient: GalacticTycoonsClient,
     private readonly llmPlanner: LlmPlanner,
-    private readonly sessions: SessionStore
+    private readonly sessions: SessionStore,
+    private readonly history: StrategyHistoryStore = new StrategyHistoryStore()
   ) {}
 
   async generate(session: AgentSession, request: SitrepRequest): Promise<SitrepResponse> {
@@ -24,7 +26,14 @@ export class SitrepService {
       ...request.refresh
     });
     const snapshotMs = Date.now() - totalStartedAt;
-    const deterministic = buildDeterministicSitrep(snapshot, request.planningContext, request.provider, request.model);
+    const historyBeforeRun = this.history.summary(session.id);
+    const deterministicBase = buildDeterministicSitrep(snapshot, request.planningContext, request.provider, request.model);
+    const deterministic = {
+      ...deterministicBase,
+      history: historyBeforeRun,
+      trendSignals: historyBeforeRun.trendSignals,
+      chainOpportunities: deterministicBase.profitability?.chainOpportunities ?? []
+    };
     const deterministicMs = Date.now() - totalStartedAt - snapshotMs;
     const llmStartedAt = Date.now();
 
@@ -38,7 +47,7 @@ export class SitrepService {
       deterministicSitrep: deterministic
     });
 
-    return {
+    const responseWithDiagnostics: SitrepResponse = {
       ...response,
       diagnostics: {
         source: "llm",
@@ -49,6 +58,14 @@ export class SitrepService {
           total: Date.now() - totalStartedAt
         }
       }
+    };
+    const updatedHistory = this.history.record(session.id, responseWithDiagnostics);
+
+    return {
+      ...responseWithDiagnostics,
+      history: updatedHistory,
+      trendSignals: updatedHistory.trendSignals,
+      chainOpportunities: responseWithDiagnostics.profitability?.chainOpportunities ?? responseWithDiagnostics.chainOpportunities ?? []
     };
   }
 }

@@ -72,9 +72,107 @@ describe("API integration", () => {
     expect(body.projections.horizons.map((horizon: { hours: number }) => horizon.hours)).toEqual([12, 24, 72, 168]);
     expect(body.projections.bands).toHaveLength(4);
     expect(body.profitability.companyFit.length).toBeGreaterThan(0);
+    expect(body.profitability.chains.length).toBeGreaterThan(0);
+    expect(body.chainOpportunities.length).toBeGreaterThan(0);
+    expect(body.history.entries).toHaveLength(1);
     expect(body.actionPlans.some((plan: { category: string }) => plan.category === "profitability")).toBe(true);
     expect(observedRefresh).toEqual({ forceCompany: true, forceMarket: true, forceGameData: false });
     expect(observedPlanningContext).toMatchObject({ userPrompt: "Find the best restock move." });
+  });
+
+  it("returns session-local strategy history without secrets", async () => {
+    const snapshot = makeSnapshot();
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async () => snapshot
+      } as any,
+      llmPlanner: {
+        generateStructuredPlan: async (input: any) => buildDeterministicSitrep(snapshot, input.planningContext, input.provider, input.model)
+      } as any
+    });
+
+    const missing = await app.inject({ method: "GET", url: "/api/agent/history" });
+    expect(missing.statusCode).toBe(401);
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const cookie = String(keys.headers["set-cookie"]);
+    for (let index = 0; index < 2; index += 1) {
+      const response = await app.inject({
+        method: "POST",
+        url: "/api/agent/sitrep",
+        headers: { cookie },
+        payload: {
+          provider: "openai",
+          model: "test-model",
+          planningContext: context
+        }
+      });
+      expect(response.statusCode).toBe(200);
+    }
+
+    const history = await app.inject({
+      method: "GET",
+      url: "/api/agent/history",
+      headers: { cookie }
+    });
+
+    expect(history.statusCode).toBe(200);
+    expect(history.json().entries).toHaveLength(2);
+    expect(history.json().trendSignals.some((signal: { kind: string }) => signal.kind === "profitability")).toBe(true);
+    expect(history.body).not.toContain("gt-secret-key");
+    expect(history.body).not.toContain("sk-secret-key");
+    expect(history.body).not.toContain("providerKeys");
+  });
+
+  it("evaluates a deterministic what-if scenario from the latest GT snapshot", async () => {
+    const snapshot = makeSnapshot();
+    let observedRefresh: unknown;
+    app = await createApp({
+      sessionStore: new SessionStore(),
+      gtClient: {
+        getSnapshot: async (_session: unknown, refresh: unknown) => {
+          observedRefresh = refresh;
+          return snapshot;
+        }
+      } as any
+    });
+
+    const keys = await app.inject({
+      method: "POST",
+      url: "/api/session/keys",
+      payload: {
+        gtApiKey: "gt-secret-key",
+        providerKeys: { openai: "sk-secret-key" }
+      }
+    });
+
+    const whatIf = await app.inject({
+      method: "POST",
+      url: "/api/agent/what-if",
+      headers: { cookie: String(keys.headers["set-cookie"]) },
+      payload: {
+        scenarioType: "stage_inputs",
+        planningContext: context,
+        recipeId: 2001
+      }
+    });
+
+    const body = whatIf.json();
+    expect(whatIf.statusCode).toBe(200);
+    expect(body.scenario.title).toContain("Tools");
+    expect(body.deltas.profitPerHour).toBeGreaterThan(0);
+    expect(body.preparedCommands.every((command: { executable: boolean }) => command.executable === false)).toBe(true);
+    expect(observedRefresh).toEqual({ forceCompany: true, forceMarket: true, forceGameData: false });
+    expect(whatIf.body).not.toContain("sk-secret-key");
   });
 
   it("returns session provider models without exposing keys", async () => {

@@ -165,10 +165,64 @@ export const profitabilityOpportunitySchema = z.object({
 });
 export type ProfitabilityOpportunity = z.infer<typeof profitabilityOpportunitySchema>;
 
+export const productionChainStepSchema = z.object({
+  recipeId: z.number(),
+  recipeName: z.string(),
+  outputMatId: z.number(),
+  outputMatName: z.string(),
+  buildingName: z.string().optional(),
+  netEstimatePerHour: z.number(),
+  marginPct: z.number().optional(),
+  companyFit: z.enum(["owned", "active", "available", "target"]),
+  setupGaps: z.array(z.string()).default([])
+});
+export type ProductionChainStep = z.infer<typeof productionChainStepSchema>;
+
+export const productionChainSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  recipeIds: z.array(z.number()).default([]),
+  outputMatId: z.number(),
+  outputMatName: z.string(),
+  steps: z.array(productionChainStepSchema).default([]),
+  totalInputCostPerHour: z.number(),
+  totalOutputValuePerHour: z.number(),
+  totalNetProfitPerHour: z.number(),
+  marginPct: z.number().optional(),
+  inputCoveragePct: z.number(),
+  liquidityScore: z.number(),
+  setupGaps: z.array(z.string()).default([]),
+  companyFit: z.enum(["active", "owned", "available", "target"]),
+  confidence: z.enum(["low", "medium", "high"]),
+  warnings: z.array(z.string()).default([])
+});
+export type ProductionChain = z.infer<typeof productionChainSchema>;
+
+export const chainOpportunitySchema = z.object({
+  id: z.string(),
+  kind: z.enum(["deepen_chain", "stage_chain", "restructure_chain"]),
+  chainId: z.string(),
+  title: z.string(),
+  recommendation: z.string(),
+  horizonId: z.string(),
+  horizonLabel: z.string(),
+  score: z.number(),
+  confidence: z.enum(["low", "medium", "high"]),
+  profitPerHour: z.number(),
+  marginPct: z.number().optional(),
+  inputCoveragePct: z.number().optional(),
+  rationale: z.array(z.string()).default([]),
+  blockers: z.array(z.string()).default([]),
+  actionId: z.string().optional()
+});
+export type ChainOpportunity = z.infer<typeof chainOpportunitySchema>;
+
 export const profitabilitySetSchema = z.object({
   recipes: z.array(profitabilityRecipeSchema).default([]),
   companyFit: z.array(profitabilityOpportunitySchema).default([]),
   globalTargets: z.array(profitabilityOpportunitySchema).default([]),
+  chains: z.array(productionChainSchema).default([]),
+  chainOpportunities: z.array(chainOpportunitySchema).default([]),
   assumptions: z.array(z.string()).default([]),
   warnings: z.array(z.string()).default([])
 });
@@ -318,6 +372,104 @@ export const companySituationSchema = z.object({
 });
 export type CompanySituation = z.infer<typeof companySituationSchema>;
 
+export const trendSignalSchema = z.object({
+  id: z.string(),
+  kind: z.enum(["cash", "company_value", "stockout", "profitability", "market", "recommendation"]),
+  severity: z.enum(["info", "positive", "warning", "critical"]),
+  title: z.string(),
+  summary: z.string(),
+  current: z.number().optional(),
+  previous: z.number().optional(),
+  delta: z.number().optional(),
+  deltaPct: z.number().optional(),
+  count: z.number().optional(),
+  actionIds: z.array(z.string()).default([]),
+  evidence: z.array(z.string()).default([])
+});
+export type TrendSignal = z.infer<typeof trendSignalSchema>;
+
+export const snapshotHistoryEntrySchema = z.object({
+  id: z.string(),
+  generatedAt: z.string(),
+  fetchedAt: z.string().optional(),
+  companyName: z.string(),
+  cash: z.number().optional(),
+  companyValue: z.number().optional(),
+  topActionTitle: z.string().optional(),
+  topActionIds: z.array(z.string()).default([]),
+  highPriorityCount: z.number(),
+  stockoutMatIds: z.array(z.number()).default([]),
+  stockoutMatNames: z.array(z.string()).default([]),
+  profitableRecipeIds: z.array(z.number()).default([]),
+  profitableRecipeNames: z.array(z.string()).default([]),
+  marketSignalMatIds: z.array(z.number()).default([]),
+  marketSignalMatNames: z.array(z.string()).default([]),
+  chainIds: z.array(z.string()).default([]),
+  chainNames: z.array(z.string()).default([]),
+  warnings: z.array(z.string()).default([])
+});
+export type SnapshotHistoryEntry = z.infer<typeof snapshotHistoryEntrySchema>;
+
+export const historySummarySchema = z.object({
+  entries: z.array(snapshotHistoryEntrySchema).default([]),
+  trendSignals: z.array(trendSignalSchema).default([]),
+  lastRunAt: z.string().optional()
+});
+export type HistorySummary = z.infer<typeof historySummarySchema>;
+
+export const scenarioMaterialDeltaSchema = z.object({
+  matId: z.number(),
+  matName: z.string(),
+  quantityDelta: z.number(),
+  cashDelta: z.number().optional()
+});
+export type ScenarioMaterialDelta = z.infer<typeof scenarioMaterialDeltaSchema>;
+
+export const whatIfScenarioRequestSchema = z.object({
+  scenarioType: z.enum(["buy_material", "build_expansion", "start_recipe", "switch_production", "stage_inputs", "increase_buffer"]),
+  planningContext: playerPlanningContextSchema,
+  matId: z.number().optional(),
+  recipeId: z.number().optional(),
+  quantity: z.number().min(0).optional(),
+  cashSpend: z.number().min(0).optional(),
+  bufferHours: z.number().min(1).max(168).optional(),
+  description: z.string().trim().max(500).optional()
+});
+export type WhatIfScenarioRequest = z.infer<typeof whatIfScenarioRequestSchema>;
+
+export const whatIfScenarioStateSchema = z.object({
+  title: z.string(),
+  summary: z.string(),
+  cash: z.number().optional(),
+  cashDisplay: z.string().optional(),
+  profitPerHour: z.number().optional(),
+  profitPerHourDisplay: z.string().optional(),
+  materialDeltas: z.array(scenarioMaterialDeltaSchema).default([]),
+  productionImpact: z.array(z.string()).default([]),
+  risk: z.enum(["low", "medium", "high", "critical"]),
+  blockers: z.array(z.string()).default([])
+});
+export type WhatIfScenarioState = z.infer<typeof whatIfScenarioStateSchema>;
+
+export const whatIfScenarioResultSchema = z.object({
+  generatedAt: z.string(),
+  scenarioType: whatIfScenarioRequestSchema.shape.scenarioType,
+  title: z.string(),
+  baseline: whatIfScenarioStateSchema,
+  scenario: whatIfScenarioStateSchema,
+  deltas: z.object({
+    cash: z.number().optional(),
+    profitPerHour: z.number().optional(),
+    materials: z.array(scenarioMaterialDeltaSchema).default([])
+  }),
+  recommendedChoice: z.enum(["baseline", "scenario", "defer"]),
+  rationale: z.array(z.string()).default([]),
+  blockers: z.array(z.string()).default([]),
+  preparedCommands: z.array(preparedCommandSchema).default([]),
+  warnings: z.array(z.string()).default([])
+});
+export type WhatIfScenarioResult = z.infer<typeof whatIfScenarioResultSchema>;
+
 export const rateLimitInfoSchema = z.object({
   endpoint: z.string(),
   remaining: z.number().optional(),
@@ -355,6 +507,9 @@ export const sitrepResponseSchema = z.object({
   projections: projectionSetSchema,
   actionPlans: z.array(actionPlanSchema),
   profitability: profitabilitySetSchema.optional(),
+  history: historySummarySchema.optional(),
+  trendSignals: z.array(trendSignalSchema).default([]).optional(),
+  chainOpportunities: z.array(chainOpportunitySchema).default([]).optional(),
   marketSignals: z.array(marketSignalSchema),
   stockoutRisks: z.array(stockoutRiskSchema),
   expansionCandidates: z.array(expansionCandidateSchema),

@@ -339,6 +339,9 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
       decisionBrief: input.deterministicSitrep.decisionBrief,
       projections: compactProjections(input.deterministicSitrep.projections),
       profitability: compactProfitability(input.deterministicSitrep.profitability),
+      history: compactHistory(input.deterministicSitrep.history),
+      trendSignals: input.deterministicSitrep.trendSignals?.slice(0, 8),
+      chainOpportunities: input.deterministicSitrep.chainOpportunities?.slice(0, 6).map(compactChainOpportunity),
       topActionPlans: input.deterministicSitrep.actionPlans.slice(0, 5).map(compactActionPlan),
       topMarketSignals: input.deterministicSitrep.marketSignals.slice(0, 8).map(compactMarketSignal),
       topStockoutRisks: input.deterministicSitrep.stockoutRisks.slice(0, 8).map(compactStockoutRisk),
@@ -358,6 +361,7 @@ function buildPrompt(input: StructuredPlanInput, validationHint: string): string
     "For actionPlanNarratives, only reference ids present in topActionPlans and only improve expectedBenefit, risk, whyNow, bestWhen, avoidIf, whatWouldChangeThis, or evidence wording.",
     "Use projections to explain the timeline, but do not add horizons, change projected quantities, or alter projection actionIds.",
     "Use profitability to explain company-fit profit moves and long-horizon restructure targets, but do not change profitability calculations or rankings.",
+    "Use history, trendSignals, and chainOpportunities to explain what persisted or changed, but do not change trend math, chain rankings, or action ids.",
     "Do not return provider, model, generatedAt, rawSnapshot, profitability, marketSignals, stockoutRisks, expansionCandidates, logisticsMoves, score, scoreBreakdown, preparedCommands, priority, category, title, or costSummary.",
     "Use the situation, score breakdowns, profitability, and compact deterministic signals below to explain why the ranked plan is situationally valid.",
     "Money values from GT raw fields are integer cents. Use the provided display strings such as cashDisplay and costSummary in player-facing prose.",
@@ -564,6 +568,28 @@ function compactProfitability(profitability: SitrepResponse["profitability"]) {
       rationale: opportunity.rationale.slice(0, 3),
       blockers: opportunity.blockers.slice(0, 4)
     })),
+    chainOpportunities: profitability.chainOpportunities.slice(0, 5).map(compactChainOpportunity),
+    chains: profitability.chains.slice(0, 5).map((chain) => ({
+      id: chain.id,
+      title: chain.title,
+      recipeIds: chain.recipeIds,
+      outputMatName: chain.outputMatName,
+      totalNetProfitPerHour: chain.totalNetProfitPerHour,
+      totalNetProfitPerHourDisplay: `${formatMoney(chain.totalNetProfitPerHour)}/h`,
+      marginPct: chain.marginPct,
+      inputCoveragePct: chain.inputCoveragePct,
+      liquidityScore: chain.liquidityScore,
+      companyFit: chain.companyFit,
+      confidence: chain.confidence,
+      setupGaps: chain.setupGaps.slice(0, 4),
+      steps: chain.steps.map((step) => ({
+        recipeId: step.recipeId,
+        outputMatName: step.outputMatName,
+        buildingName: step.buildingName,
+        netEstimatePerHour: step.netEstimatePerHour,
+        companyFit: step.companyFit
+      }))
+    })),
     topRecipes: profitability.recipes.slice(0, 8).map((recipe) => ({
       recipeId: recipe.recipeId,
       recipeName: recipe.recipeName,
@@ -580,6 +606,45 @@ function compactProfitability(profitability: SitrepResponse["profitability"]) {
     })),
     assumptions: profitability.assumptions,
     warnings: profitability.warnings.slice(0, 5)
+  };
+}
+
+function compactChainOpportunity(opportunity: NonNullable<SitrepResponse["chainOpportunities"]>[number]) {
+  return {
+    id: opportunity.id,
+    kind: opportunity.kind,
+    chainId: opportunity.chainId,
+    title: opportunity.title,
+    recommendation: opportunity.recommendation,
+    horizonLabel: opportunity.horizonLabel,
+    score: opportunity.score,
+    confidence: opportunity.confidence,
+    profitPerHour: opportunity.profitPerHour,
+    profitPerHourDisplay: `${formatMoney(opportunity.profitPerHour)}/h`,
+    marginPct: opportunity.marginPct,
+    inputCoveragePct: opportunity.inputCoveragePct,
+    rationale: opportunity.rationale.slice(0, 3),
+    blockers: opportunity.blockers.slice(0, 4)
+  };
+}
+
+function compactHistory(history: SitrepResponse["history"]) {
+  if (!history) return undefined;
+  return {
+    lastRunAt: history.lastRunAt,
+    entries: history.entries.slice(-4).map((entry) => ({
+      generatedAt: entry.generatedAt,
+      companyName: entry.companyName,
+      cash: entry.cash,
+      companyValue: entry.companyValue,
+      topActionTitle: entry.topActionTitle,
+      highPriorityCount: entry.highPriorityCount,
+      stockoutMatNames: entry.stockoutMatNames.slice(0, 4),
+      profitableRecipeNames: entry.profitableRecipeNames.slice(0, 4),
+      marketSignalMatNames: entry.marketSignalMatNames.slice(0, 4),
+      chainNames: entry.chainNames.slice(0, 4)
+    })),
+    trendSignals: history.trendSignals.slice(0, 8)
   };
 }
 
